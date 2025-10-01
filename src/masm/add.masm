@@ -1,0 +1,18 @@
+begin 
+# Push 3 to the stack
+push.3 
+
+# Push 5 to the stack
+push.5 
+
+# Add the top two elements of the stack
+add 
+
+# Swap the top two elements of the stack
+swap 
+
+# Drop the top element of the stack
+drop 
+
+# End the program
+end

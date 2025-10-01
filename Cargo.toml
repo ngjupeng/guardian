@@ -1,0 +1,8 @@
+[package]
+name = "private-state-manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+miden-processor = "0.16.4"
+miden-vm = "0.16.4"
