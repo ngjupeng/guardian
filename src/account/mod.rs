@@ -1,77 +1,78 @@
 pub mod noop_auth_component;
 pub mod add_component;
 
-use miden_objects::{account::{Account, AccountCode, AccountStorage}, asset::AssetVault, Felt};
+use miden_objects::account::Account;
+use miden_objects::utils::serde::{Deserializable, Serializable};
+use base64::Engine;
 
-trait ToJson {
+pub trait ToJson {
   fn to_json(&self) -> serde_json::Value;
 }
 
-trait FromJson {
-  fn from_json(json: serde_json::Value) -> Self;
-}
-
-impl ToJson for AssetVault {
-  fn to_json(&self) -> serde_json::Value {
-    todo!()
-  }
-}
-
-impl ToJson for AccountStorage {
-  fn to_json(&self) -> serde_json::Value {
-    todo!()
-  }
-}
-
-impl ToJson for AccountCode {
-  fn to_json(&self) -> serde_json::Value {
-    todo!()
-  }
-}
-
-impl ToJson for Felt {
-  fn to_json(&self) -> serde_json::Value {
-    todo!()
-  }
+pub trait FromJson: Sized {
+  fn from_json(json: &serde_json::Value) -> Result<Self, String>;
 }
 
 impl ToJson for Account {
   fn to_json(&self) -> serde_json::Value {
-    let parts = self.clone().into_parts();
-    let json = serde_json::json!({
-      "account_id": parts.0.to_hex(),
-      "vault": parts.1.to_json(),
-      "storage": parts.2.to_json(),
-      "code": parts.3.to_json(),
-      "nonce": parts.4.to_json(),
-    });
-    json
+    let bytes = self.to_bytes();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    serde_json::json!({
+      "data": encoded,
+      "account_id": self.id().to_hex(),
+    })
   }
 }
 
+impl FromJson for Account {
+  fn from_json(json: &serde_json::Value) -> Result<Self, String> {
+    let encoded = json.get("data")
+      .and_then(|v| v.as_str())
+      .ok_or("Missing or invalid 'data' field")?;
 
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)
+      .map_err(|e| format!("Base64 decode error: {}", e))?;
 
-pub fn account_to_json(account: Account) {
-  let parts = account.into_parts();
-  let json = serde_json::json!({
-    "account_id": format!("{:?}", parts.0),
-    "vault": format!("{:?}", parts.1),
-    "storage": format!("{:?}", parts.2),
-    "code": format!("{:?}", parts.3),
-    "nonce": format!("{:?}", parts.4),
-  });
-  println!("{:?}", serde_json::to_string_pretty(&json).unwrap());
+    Account::read_from_bytes(&bytes)
+      .map_err(|e| format!("Deserialization error: {}", e))
+  }
 }
 
-// pub fn deserialize_account(json: String) -> Account {
-//   let parts: (AccountId, AssetVault, AccountStorage, AccountCode, Felt) = serde_json::from_str(&json).unwrap();
-//   let account = Account::from_parts(
-//     parts.0,
-//     parts.1,
-//     parts.2,
-//     parts.3,
-//     parts.4,
-//   );
-//   account
-  
-// }
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use miden_lib::account::{auth::AuthRpoFalcon512, wallets::BasicWallet};
+  use miden_objects::{
+    account::AccountBuilder,
+    crypto::{dsa::rpo_falcon512::PublicKey, rand::Randomizable},
+  };
+  use miden_vm::Word;
+
+  #[test]
+  fn test_account_json_round_trip() {
+    // Create a test account
+    let public_key = PublicKey::new(Word::from_random_bytes(&[0; 32]).unwrap());
+    let (account, _) = AccountBuilder::new([0xff; 32])
+      .with_auth_component(AuthRpoFalcon512::new(public_key))
+      .with_component(BasicWallet)
+      .build()
+      .unwrap();
+
+    // Serialize to JSON
+    let json = account.to_json();
+    let json_string = serde_json::to_string(&json).unwrap();
+    let json_pretty = serde_json::to_string_pretty(&json).unwrap();
+
+    // Deserialize from JSON
+    let deserialized_account = Account::from_json(&json).expect("Failed to deserialize account");
+
+    // Verify round-trip
+    assert_eq!(account.id(), deserialized_account.id());
+    assert_eq!(account.nonce(), deserialized_account.nonce());
+    assert_eq!(account.commitment(), deserialized_account.commitment());
+    assert_eq!(account.storage().commitment(), deserialized_account.storage().commitment());
+    assert_eq!(account.code().commitment(), deserialized_account.code().commitment());
+
+    println!("Round-trip test passed!");
+  }
+}
