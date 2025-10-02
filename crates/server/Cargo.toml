@@ -3,5 +3,18 @@ name = "private-state-manager-server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
 [dependencies]
+axum = "0.8.6"
+serde = "1.0.228"
+tokio = { version = "1.47.1", features = ["full"] }
+
+# shared
 private-state-manager-shared = { path = "../shared" }
