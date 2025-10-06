@@ -2,7 +2,7 @@
 
 ## Running with Docker Compose
 
-Start the server and PostgreSQL database:
+Start the server:
 
 ```bash
 docker-compose up -d
