@@ -1,7 +1,7 @@
+use crate::services;
 use crate::state::AppState;
 use crate::storage::DeltaObject;
 use tonic::{Request, Response, Status};
-// use crate::services;
 
 // Include the generated protobuf code
 pub mod state_manager {
@@ -23,66 +23,145 @@ pub struct StateManagerService {
 impl StateManager for StateManagerService {
     async fn configure(
         &self,
-        _request: Request<ConfigureRequest>,
+        request: Request<ConfigureRequest>,
     ) -> Result<Response<ConfigureResponse>, Status> {
-        // TODO: Implement
-        Ok(Response::new(ConfigureResponse {
-            success: false,
-            message: "Not implemented".to_string(),
-        }))
+        let req = request.into_inner();
+
+        // Parse initial_state JSON
+        let initial_state: serde_json::Value = serde_json::from_str(&req.initial_state)
+            .map_err(|e| Status::invalid_argument(format!("Invalid initial_state JSON: {}", e)))?;
+
+        // Call service layer
+        match services::configure_account(
+            &self.app_state,
+            req.account_id.clone(),
+            initial_state,
+            req.storage_type,
+            req.cosigner_pubkeys,
+        )
+        .await
+        {
+            Ok(_) => Ok(Response::new(ConfigureResponse {
+                success: true,
+                message: format!("Account '{}' configured successfully", req.account_id),
+            })),
+            Err(e) => Ok(Response::new(ConfigureResponse {
+                success: false,
+                message: e.message,
+            })),
+        }
     }
 
     async fn push_delta(
         &self,
-        _request: Request<PushDeltaRequest>,
+        request: Request<PushDeltaRequest>,
     ) -> Result<Response<PushDeltaResponse>, Status> {
-        // TODO: Implement
-        Ok(Response::new(PushDeltaResponse {
-            success: false,
-            message: "Not implemented".to_string(),
-            delta: None,
-        }))
+        let req = request.into_inner();
+
+        // Parse delta_payload JSON
+        let delta_payload: serde_json::Value = serde_json::from_str(&req.delta_payload)
+            .map_err(|e| Status::invalid_argument(format!("Invalid delta_payload JSON: {}", e)))?;
+
+        // Convert proto request to internal DeltaObject
+        let delta = DeltaObject {
+            account_id: req.account_id,
+            nonce: req.nonce,
+            prev_commitment: req.prev_commitment,
+            delta_hash: req.delta_hash,
+            delta_payload,
+            ack_sig: req.ack_sig,
+            publisher_pubkey: req.publisher_pubkey,
+            publisher_sig: req.publisher_sig,
+            candidate_at: req.candidate_at,
+            canonical_at: req.canonical_at,
+            discarded_at: req.discarded_at,
+        };
+
+        // Call service layer
+        match services::push_delta(&self.app_state, delta).await {
+            Ok(delta) => Ok(Response::new(PushDeltaResponse {
+                success: true,
+                message: "Delta pushed successfully".to_string(),
+                delta: Some(delta_to_proto(&delta)),
+            })),
+            Err(e) => Ok(Response::new(PushDeltaResponse {
+                success: false,
+                message: e.message,
+                delta: None,
+            })),
+        }
     }
 
     async fn get_delta(
         &self,
-        _request: Request<GetDeltaRequest>,
+        request: Request<GetDeltaRequest>,
     ) -> Result<Response<GetDeltaResponse>, Status> {
-        // TODO: Implement
-        Ok(Response::new(GetDeltaResponse {
-            success: false,
-            message: "Not implemented".to_string(),
-            delta: None,
-        }))
+        let req = request.into_inner();
+
+        // Call service layer
+        match services::get_delta(&self.app_state, &req.account_id, req.nonce).await {
+            Ok(delta) => Ok(Response::new(GetDeltaResponse {
+                success: true,
+                message: "Delta retrieved successfully".to_string(),
+                delta: Some(delta_to_proto(&delta)),
+            })),
+            Err(e) => Ok(Response::new(GetDeltaResponse {
+                success: false,
+                message: e.message,
+                delta: None,
+            })),
+        }
     }
 
     async fn get_delta_head(
         &self,
-        _request: Request<GetDeltaHeadRequest>,
+        request: Request<GetDeltaHeadRequest>,
     ) -> Result<Response<GetDeltaHeadResponse>, Status> {
-        // TODO: Implement
-        Ok(Response::new(GetDeltaHeadResponse {
-            success: false,
-            message: "Not implemented".to_string(),
-            latest_nonce: None,
-        }))
+        let req = request.into_inner();
+
+        // Call service layer
+        match services::get_latest_nonce(&self.app_state, &req.account_id).await {
+            Ok(latest_nonce) => Ok(Response::new(GetDeltaHeadResponse {
+                success: true,
+                message: if latest_nonce.is_some() {
+                    "Latest nonce retrieved successfully".to_string()
+                } else {
+                    "No deltas found for account".to_string()
+                },
+                latest_nonce,
+            })),
+            Err(e) => Ok(Response::new(GetDeltaHeadResponse {
+                success: false,
+                message: e.message,
+                latest_nonce: None,
+            })),
+        }
     }
 
     async fn get_state(
         &self,
-        _request: Request<GetStateRequest>,
+        request: Request<GetStateRequest>,
     ) -> Result<Response<GetStateResponse>, Status> {
-        // TODO: Implement
-        Ok(Response::new(GetStateResponse {
-            success: false,
-            message: "Not implemented".to_string(),
-            state: None,
-        }))
+        let req = request.into_inner();
+
+        // Call service layer
+        match services::get_state(&self.app_state, &req.account_id).await {
+            Ok(state) => Ok(Response::new(GetStateResponse {
+                success: true,
+                message: "State retrieved successfully".to_string(),
+                state: Some(state_to_proto(&state)),
+            })),
+            Err(e) => Ok(Response::new(GetStateResponse {
+                success: false,
+                message: e.message,
+                state: None,
+            })),
+        }
     }
 }
 
 // Helper functions to convert between internal types and protobuf types
-fn _delta_to_proto(delta: &DeltaObject) -> state_manager::DeltaObject {
+fn delta_to_proto(delta: &DeltaObject) -> state_manager::DeltaObject {
     state_manager::DeltaObject {
         account_id: delta.account_id.clone(),
         nonce: delta.nonce,
@@ -98,7 +177,7 @@ fn _delta_to_proto(delta: &DeltaObject) -> state_manager::DeltaObject {
     }
 }
 
-fn _state_to_proto(state: &crate::storage::AccountState) -> state_manager::AccountState {
+fn state_to_proto(state: &crate::storage::AccountState) -> state_manager::AccountState {
     state_manager::AccountState {
         account_id: state.account_id.clone(),
         state_json: state.state_json.to_string(),
