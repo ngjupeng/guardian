@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::handlers::configure::ConfigureRequest;
+use crate::http::ConfigureRequest;
 
 pub mod file_store;
 

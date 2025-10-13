@@ -2,6 +2,10 @@
 
 Server for managing private account states and deltas.
 
+The server supports both **HTTP REST** and **gRPC** protocols simultaneously:
+- HTTP server runs on port **3000**
+- gRPC server runs on port **50051**
+
 ### Configuration
 
 #### Environment Variables
@@ -24,20 +28,24 @@ Account metadata is stored in `.metadata/accounts.json` and includes:
 
 ### API Endpoints
 
-POST `/configure`
-Configure a new account with initial state.
+#### HTTP REST API (Port 3000)
 
-POST `/delta`
-Submit a new delta for an account.
+- **POST** `/configure` - Configure a new account with initial state
+- **POST** `/delta` - Submit a new delta for an account
+- **GET** `/delta?account_id=<id>&nonce=<n>` - Retrieve a specific delta by account ID and nonce
+- **GET** `/head?account_id=<id>` - Get the latest delta (highest nonce) for an account
+- **GET** `/state?account_id=<id>` - Retrieve the current state of an account
 
-GET `/delta`
-Retrieve a specific delta by account ID and nonce.
+#### gRPC API (Port 50051)
 
-GET `/head`
-Get the latest delta (highest nonce) for an account.
+All methods are available through the `state_manager.StateManager` service:
+- `Configure(ConfigureRequest) -> ConfigureResponse`
+- `PushDelta(PushDeltaRequest) -> PushDeltaResponse`
+- `GetDelta(GetDeltaRequest) -> GetDeltaResponse`
+- `GetDeltaHead(GetDeltaHeadRequest) -> GetDeltaHeadResponse`
+- `GetState(GetStateRequest) -> GetStateResponse`
 
-GET `/state`
-Retrieve the current state of an account.
+See `proto/state_manager.proto` for the complete protocol buffer definitions.
 
 
 ### Testing with curl
@@ -96,3 +104,70 @@ curl "http://localhost:3000/head?account_id=alice"
 ```bash
 curl "http://localhost:3000/state?account_id=alice"
 ```
+
+### Testing with grpcurl
+
+Install grpcurl:
+```bash
+brew install grpcurl
+```
+
+#### 1. List available services
+```bash
+grpcurl -plaintext localhost:50051 list
+```
+
+#### 2. Configure an account
+```bash
+grpcurl -plaintext -d '{
+  "account_id": "alice",
+  "initial_state": "{}",
+  "storage_type": "local",
+  "cosigner_pubkeys": []
+}' localhost:50051 state_manager.StateManager/Configure
+```
+
+#### 3. Push a delta
+```bash
+grpcurl -plaintext -d '{
+  "account_id": "alice",
+  "nonce": 1,
+  "prev_commitment": "prev_commit_hash",
+  "delta_hash": "delta_hash_123",
+  "delta_payload": "{\"operation\":\"transfer\",\"amount\":100}",
+  "ack_sig": "ack_signature",
+  "publisher_pubkey": "pubkey_xyz",
+  "publisher_sig": "publisher_signature",
+  "candidate_at": "2025-10-08T12:00:00Z"
+}' localhost:50051 state_manager.StateManager/PushDelta
+```
+
+#### 4. Get a specific delta
+```bash
+grpcurl -plaintext -d '{
+  "account_id": "alice",
+  "nonce": 1
+}' localhost:50051 state_manager.StateManager/GetDelta
+```
+
+#### 5. Get the latest delta head
+```bash
+grpcurl -plaintext -d '{
+  "account_id": "alice"
+}' localhost:50051 state_manager.StateManager/GetDeltaHead
+```
+
+#### 6. Get account state
+```bash
+grpcurl -plaintext -d '{
+  "account_id": "alice"
+}' localhost:50051 state_manager.StateManager/GetState
+```
+
+### Building gRPC Clients
+
+Use the proto file at `proto/state_manager.proto` to generate client code:
+- **Rust**: `tonic` and `prost`
+- **Python**: `grpcio` and `grpcio-tools`
+- **Go**: Official `protoc` compiler with Go plugins
+- **JavaScript/TypeScript**: `@grpc/grpc-js` and `@grpc/proto-loader`
