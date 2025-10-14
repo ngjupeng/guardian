@@ -2,7 +2,12 @@ use crate::auth::AuthType;
 use crate::services;
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject};
-use axum::{extract::Query, extract::State, http::StatusCode, Json};
+use axum::{
+    extract::Query,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -48,9 +53,27 @@ pub struct DeltaHeadResponse {
     pub message: Option<String>,
 }
 
-// ============================================================================
-// HTTP Handlers
-// ============================================================================
+
+/// Extract publisher authentication data from HTTP headers
+/// Returns (publisher_pubkey, publisher_sig) tuple
+fn extract_publisher_auth(headers: &HeaderMap) -> Result<(String, String), String> {
+    let publisher_pubkey = headers
+        .get("x-publisher-pubkey")
+        .ok_or_else(|| "Missing x-publisher-pubkey header".to_string())?
+        .to_str()
+        .map_err(|_| "Invalid x-publisher-pubkey header".to_string())?
+        .to_string();
+
+    let publisher_sig = headers
+        .get("x-publisher-sig")
+        .ok_or_else(|| "Missing x-publisher-sig header".to_string())?
+        .to_str()
+        .map_err(|_| "Invalid x-publisher-sig header".to_string())?
+        .to_string();
+
+    Ok((publisher_pubkey, publisher_sig))
+}
+
 
 pub async fn configure(
     State(state): State<AppState>,
@@ -85,9 +108,24 @@ pub async fn configure(
 
 pub async fn push_delta(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<DeltaObject>,
 ) -> (StatusCode, Json<DeltaObject>) {
-    match services::push_delta(&state, payload).await {
+    // Extract publisher authentication data from headers
+    let (publisher_pubkey, publisher_sig) = match extract_publisher_auth(&headers) {
+        Ok(auth) => auth,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(DeltaObject {
+                    account_id: e,
+                    ..Default::default()
+                }),
+            )
+        }
+    };
+
+    match services::push_delta(&state, payload, publisher_pubkey, publisher_sig).await {
         Ok(delta) => (StatusCode::OK, Json(delta)),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -101,9 +139,24 @@ pub async fn push_delta(
 
 pub async fn get_delta(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<DeltaQuery>,
 ) -> (StatusCode, Json<DeltaObject>) {
-    match services::get_delta(&state, &query.account_id, query.nonce).await {
+    // Extract publisher authentication data from headers
+    let (publisher_pubkey, publisher_sig) = match extract_publisher_auth(&headers) {
+        Ok(auth) => auth,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(DeltaObject {
+                    account_id: e,
+                    ..Default::default()
+                }),
+            )
+        }
+    };
+
+    match services::get_delta(&state, &query.account_id, query.nonce, publisher_pubkey, publisher_sig).await {
         Ok(delta) => (StatusCode::OK, Json(delta)),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -117,9 +170,25 @@ pub async fn get_delta(
 
 pub async fn get_delta_head(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<StateQuery>,
 ) -> (StatusCode, Json<DeltaHeadResponse>) {
-    match services::get_latest_nonce(&state, &query.account_id).await {
+    // Extract publisher authentication data from headers
+    let (publisher_pubkey, publisher_sig) = match extract_publisher_auth(&headers) {
+        Ok(auth) => auth,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(DeltaHeadResponse {
+                    success: false,
+                    latest_nonce: None,
+                    message: Some(e),
+                }),
+            )
+        }
+    };
+
+    match services::get_latest_nonce(&state, &query.account_id, publisher_pubkey, publisher_sig).await {
         Ok(latest_nonce) => (
             StatusCode::OK,
             Json(DeltaHeadResponse {
@@ -145,9 +214,24 @@ pub async fn get_delta_head(
 
 pub async fn get_state(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<StateQuery>,
 ) -> (StatusCode, Json<AccountState>) {
-    match services::get_state(&state, &query.account_id).await {
+    // Extract publisher authentication data from headers
+    let (publisher_pubkey, publisher_sig) = match extract_publisher_auth(&headers) {
+        Ok(auth) => auth,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AccountState {
+                    account_id: e,
+                    ..Default::default()
+                }),
+            )
+        }
+    };
+
+    match services::get_state(&state, &query.account_id, publisher_pubkey, publisher_sig).await {
         Ok(account_state) => (StatusCode::OK, Json(account_state)),
         Err(e) => (
             StatusCode::NOT_FOUND,
