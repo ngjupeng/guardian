@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::api::http::ConfigureRequest;
 use crate::auth::AuthType;
-use crate::http::ConfigureRequest;
 
 pub mod file_store;
 

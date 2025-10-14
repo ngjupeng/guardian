@@ -2,10 +2,10 @@ use tonic::{Request, metadata::MetadataValue};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use server::state::AppState;
-use server::grpc::{StateManagerService, state_manager::*};
-use server::storage::filesystem::{FilesystemConfig, FilesystemService};
+use server::api::grpc::{StateManagerService, state_manager::*};
 use server::metadata::file_store::FileMetadataStore;
+use server::state::AppState;
+use server::storage::filesystem::{FilesystemConfig, FilesystemService};
 
 use miden_objects::account::{AccountId, AccountIdVersion, AccountType, AccountStorageMode};
 use miden_objects::crypto::dsa::rpo_falcon512::SecretKey;
@@ -96,7 +96,7 @@ fn create_request_with_auth<T>(payload: T, pubkey: &str, sig: &str) -> Request<T
 
 #[tokio::test]
 async fn test_grpc_configure_account() {
-    use server::grpc::state_manager::state_manager_server::StateManager;
+    use server::api::grpc::state_manager::state_manager_server::StateManager;
 
     let state = create_test_app_state().await;
     let service = create_grpc_service(state);
@@ -121,7 +121,7 @@ async fn test_grpc_configure_account() {
 
 #[tokio::test]
 async fn test_grpc_configure_and_push_delta_with_auth() {
-    use server::grpc::state_manager::state_manager_server::StateManager;
+    use server::api::grpc::state_manager::state_manager_server::StateManager;
 
     let state = create_test_app_state().await;
     let service = create_grpc_service(state);
@@ -165,7 +165,7 @@ async fn test_grpc_configure_and_push_delta_with_auth() {
 
 #[tokio::test]
 async fn test_grpc_push_delta_unauthorized_cosigner() {
-    use server::grpc::state_manager::state_manager_server::StateManager;
+    use server::api::grpc::state_manager::state_manager_server::StateManager;
 
     let state = create_test_app_state().await;
     let service = create_grpc_service(state);
@@ -214,7 +214,7 @@ async fn test_grpc_push_delta_unauthorized_cosigner() {
 
 #[tokio::test]
 async fn test_grpc_push_delta_missing_auth_metadata() {
-    use server::grpc::state_manager::state_manager_server::StateManager;
+    use server::api::grpc::state_manager::state_manager_server::StateManager;
 
     let state = create_test_app_state().await;
     let service = create_grpc_service(state);
@@ -261,7 +261,7 @@ async fn test_grpc_push_delta_missing_auth_metadata() {
 
 #[tokio::test]
 async fn test_grpc_get_delta_with_auth() {
-    use server::grpc::state_manager::state_manager_server::StateManager;
+    use server::api::grpc::state_manager::state_manager_server::StateManager;
 
     let state = create_test_app_state().await;
     let service = create_grpc_service(state);

@@ -3,19 +3,18 @@ pub use private_state_manager_shared::{FromJson, ToJson};
 use axum::{routing::get, routing::post, Router};
 use tonic::transport::Server;
 
+pub mod api;
 pub mod auth;
 pub mod config;
-pub mod grpc;
-pub mod http;
 pub mod metadata;
 pub mod services;
 pub mod state;
 pub mod storage;
 
+use api::grpc::state_manager::state_manager_server::StateManagerServer;
+use api::grpc::StateManagerService;
+use api::http::{configure, get_delta, get_delta_head, get_state, push_delta};
 use config::{initialize_metadata, initialize_storage};
-use grpc::state_manager::state_manager_server::StateManagerServer;
-use grpc::StateManagerService;
-use http::{configure, get_delta, get_delta_head, get_state, push_delta};
 use state::AppState;
 
 async fn root() -> &'static str {
@@ -47,7 +46,7 @@ async fn run_grpc_server(app_state: AppState) {
 
     // Enable gRPC reflection
     let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(grpc::state_manager::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(api::grpc::state_manager::FILE_DESCRIPTOR_SET)
         .build_v1()
         .unwrap();
 

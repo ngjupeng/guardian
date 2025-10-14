@@ -7,10 +7,10 @@ use tower::{Service, ServiceExt}; // For making service calls
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use server::state::AppState;
-use server::http;
-use server::storage::filesystem::{FilesystemConfig, FilesystemService};
+use server::api::http;
 use server::metadata::file_store::FileMetadataStore;
+use server::state::AppState;
+use server::storage::filesystem::{FilesystemConfig, FilesystemService};
 
 use miden_objects::account::{AccountId, AccountIdVersion, AccountType, AccountStorageMode};
 use miden_objects::crypto::dsa::rpo_falcon512::SecretKey;
