@@ -48,7 +48,26 @@ All methods are available through the `state_manager.StateManager` service:
 See `proto/state_manager.proto` for the complete protocol buffer definitions.
 
 
-### Testing with curl
+## Testing
+
+```bash
+cargo test
+```
+
+Run E2E tests by:
+
+```bash
+cargo test --package private-state-manager-server --test e2e_http_auth_test -- --test-threads=1
+```
+
+This will run the tests in the `e2e_http_auth_test.rs` file.
+
+> **Note**: e2e tests scope is limited to HTTP authentication for now.
+
+### Manualesting with curl
+
+
+#### Manual tests using curl
 
 #### 1. Configure an account
 

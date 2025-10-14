@@ -18,15 +18,11 @@ impl ServiceError {
     }
 }
 
-/// Verify signature and authorization for a request
-fn verify_request_auth(
-    auth_type: &AuthType,
+/// Verify that the publisher public key is authorized (in the cosigner list)
+fn verify_publisher_authorized(
     account_metadata: &AccountMetadata,
-    account_id: &str,
     publisher_pubkey: &str,
-    publisher_sig: &str,
 ) -> ServiceResult<()> {
-    // Check if publisher is present in the account's cosigner list
     if account_metadata.cosigner_pubkeys.contains(&publisher_pubkey.to_string()) {
         Ok(())
     } else {
@@ -35,6 +31,18 @@ fn verify_request_auth(
             publisher_pubkey, account_metadata.account_id
         )))
     }
+}
+
+/// Verify signature and authorization for a request
+fn verify_request_auth(
+    auth_type: &AuthType,
+    account_metadata: &AccountMetadata,
+    account_id: &str,
+    publisher_pubkey: &str,
+    publisher_sig: &str,
+) -> ServiceResult<()> {
+    // Check if publisher is authorized
+    verify_publisher_authorized(account_metadata, publisher_pubkey)?;
 
     // Verify signature
     auth_type
