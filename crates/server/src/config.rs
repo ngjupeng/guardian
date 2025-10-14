@@ -1,7 +1,7 @@
-use crate::metadata::file_store::FileMetadataStore;
 use crate::metadata::MetadataStore;
-use crate::storage::filesystem::{FilesystemConfig, FilesystemService};
+use crate::metadata::file_store::FileMetadataStore;
 use crate::storage::StorageBackend;
+use crate::storage::filesystem::{FilesystemConfig, FilesystemService};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

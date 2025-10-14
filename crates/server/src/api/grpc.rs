@@ -1,5 +1,8 @@
-use crate::auth::AuthType;
-use crate::services::{self, AuthData, ConfigureAccountParams, PushDeltaParams, GetDeltaParams, GetDeltaHeadParams, GetStateParams};
+use crate::auth::{Auth, Credentials};
+use crate::services::{
+    self, ConfigureAccountParams, GetDeltaHeadParams, GetDeltaParams, GetStateParams,
+    PushDeltaParams,
+};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
 use tonic::{Request, Response, Status};
@@ -20,8 +23,9 @@ pub struct StateManagerService {
     pub app_state: AppState,
 }
 
-/// Extract authentication data from gRPC metadata
-fn extract_auth(metadata: &tonic::metadata::MetadataMap) -> Result<AuthData, Status> {
+/// Extract authentication credentials from gRPC metadata
+#[allow(clippy::result_large_err)]
+fn extract_auth(metadata: &tonic::metadata::MetadataMap) -> Result<Credentials, Status> {
     let pubkey = metadata
         .get("x-pubkey")
         .and_then(|v| v.to_str().ok())
@@ -34,7 +38,7 @@ fn extract_auth(metadata: &tonic::metadata::MetadataMap) -> Result<AuthData, Sta
         .ok_or_else(|| Status::invalid_argument("Missing or invalid x-signature metadata"))?
         .to_string();
 
-    Ok(AuthData { pubkey, signature })
+    Ok(Credentials::signature(pubkey, signature))
 }
 
 #[tonic::async_trait]
@@ -45,17 +49,17 @@ impl StateManager for StateManagerService {
     ) -> Result<Response<ConfigureResponse>, Status> {
         let req = request.into_inner();
 
-        // Parse auth_type
-        let auth_type: AuthType = serde_json::from_str(&format!("\"{}\"", req.auth_type))
-            .map_err(|e| Status::invalid_argument(format!("Invalid auth_type: {}", e)))?;
+        // Parse auth
+        let auth: Auth = serde_json::from_str(&format!("\"{}\"", req.auth_type))
+            .map_err(|e| Status::invalid_argument(format!("Invalid auth type: {e}")))?;
 
         // Parse initial_state JSON
         let initial_state: serde_json::Value = serde_json::from_str(&req.initial_state)
-            .map_err(|e| Status::invalid_argument(format!("Invalid initial_state JSON: {}", e)))?;
+            .map_err(|e| Status::invalid_argument(format!("Invalid initial_state JSON: {e}")))?;
 
         let params = ConfigureAccountParams {
             account_id: req.account_id.clone(),
-            auth_type,
+            auth,
             initial_state,
             storage_type: req.storage_type,
             cosigner_pubkeys: req.cosigner_pubkeys,
@@ -85,7 +89,7 @@ impl StateManager for StateManagerService {
 
         // Parse delta_payload JSON
         let delta_payload: serde_json::Value = serde_json::from_str(&req.delta_payload)
-            .map_err(|e| Status::invalid_argument(format!("Invalid delta_payload JSON: {}", e)))?;
+            .map_err(|e| Status::invalid_argument(format!("Invalid delta_payload JSON: {e}")))?;
 
         // Convert proto request to internal DeltaObject
         let delta = DeltaObject {
@@ -100,7 +104,10 @@ impl StateManager for StateManagerService {
             discarded_at: req.discarded_at,
         };
 
-        let params = PushDeltaParams { delta, auth };
+        let params = PushDeltaParams {
+            delta,
+            credentials: auth,
+        };
 
         // Call service layer
         match services::push_delta(&self.app_state, params).await {
@@ -129,7 +136,7 @@ impl StateManager for StateManagerService {
         let params = GetDeltaParams {
             account_id: req.account_id,
             nonce: req.nonce,
-            auth,
+            credentials: auth,
         };
 
         // Call service layer
@@ -158,7 +165,7 @@ impl StateManager for StateManagerService {
 
         let params = GetDeltaHeadParams {
             account_id: req.account_id,
-            auth,
+            credentials: auth,
         };
 
         // Call service layer
@@ -187,7 +194,7 @@ impl StateManager for StateManagerService {
 
         let params = GetStateParams {
             account_id: req.account_id,
-            auth,
+            credentials: auth,
         };
 
         // Call service layer

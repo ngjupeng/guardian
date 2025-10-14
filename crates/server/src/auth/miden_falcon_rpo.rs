@@ -41,8 +41,8 @@ pub fn verify_request_signature(
 /// # Arguments
 /// * `account_id_hex` - The account ID in hex format (e.g., "0x1234...")
 fn account_id_to_digest(account_id_hex: &str) -> Result<Word, String> {
-    let account_id = AccountId::from_hex(account_id_hex)
-        .map_err(|e| format!("Invalid account ID hex: {}", e))?;
+    let account_id =
+        AccountId::from_hex(account_id_hex).map_err(|e| format!("Invalid account ID hex: {e}"))?;
 
     // Convert AccountId to its field element representation [prefix, suffix]
     let account_id_felts: [Felt; 2] = account_id.into();
@@ -57,7 +57,7 @@ fn account_id_to_digest(account_id_hex: &str) -> Result<Word, String> {
 
     // Hash using RPO256 and return as Word
     let digest = Rpo256::hash_elements(&message_elements);
-    Ok(digest.into())
+    Ok(digest)
 }
 
 /// Parse a hex-encoded public key
@@ -67,8 +67,7 @@ fn account_id_to_digest(account_id_hex: &str) -> Result<Word, String> {
 fn parse_public_key(hex_str: &str) -> Result<PublicKey, String> {
     // Use Miden's Word::try_from to parse the hex string directly
     // This handles hex decoding, byte-to-felt conversion, and field element validation
-    let word = Word::try_from(hex_str)
-        .map_err(|e| format!("Invalid public key hex: {}", e))?;
+    let word = Word::try_from(hex_str).map_err(|e| format!("Invalid public key hex: {e}"))?;
 
     // Convert Word to PublicKey
     Ok(PublicKey::new(word))
@@ -80,22 +79,19 @@ fn parse_public_key(hex_str: &str) -> Result<PublicKey, String> {
 /// * `hex_str` - Hex-encoded signature
 fn parse_signature(hex_str: &str) -> Result<Signature, String> {
     let hex_str = hex_str.trim_start_matches("0x");
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid signature hex: {e}"))?;
 
     // Miden Signature is 1563 bytes when serialized:
     // 1 byte header + 40 bytes nonce + 625 bytes s2 polynomial + 897 bytes h polynomial
     const EXPECTED_SIG_LEN: usize = 1563;
     if bytes.len() != EXPECTED_SIG_LEN {
         return Err(format!(
-            "Signature must be exactly {} bytes, got {} bytes",
-            EXPECTED_SIG_LEN,
+            "Signature must be exactly {EXPECTED_SIG_LEN} bytes, got {} bytes",
             bytes.len()
         ));
     }
 
-    Signature::read_from_bytes(&bytes)
-        .map_err(|e| format!("Failed to deserialize signature: {}", e))
+    Signature::read_from_bytes(&bytes).map_err(|e| format!("Failed to deserialize signature: {e}"))
 }
 
 #[cfg(test)]
@@ -106,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_falcon_sign_and_verify_account_id() {
-        use miden_objects::account::{AccountIdVersion, AccountType, AccountStorageMode};
+        use miden_objects::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
@@ -119,7 +115,8 @@ mod tests {
         );
         let account_id_hex = account_id.to_hex();
 
-        let message = account_id_to_digest(&account_id_hex).expect("Failed to create message digest");
+        let message =
+            account_id_to_digest(&account_id_hex).expect("Failed to create message digest");
 
         let signature = secret_key.sign(message);
 
@@ -129,16 +126,23 @@ mod tests {
         let signature_bytes = signature.to_bytes();
         let signature_hex = format!("0x{}", hex::encode(&signature_bytes));
 
-        assert_eq!(signature_bytes.len(), 1563, "Signature should be 1563 bytes");
+        assert_eq!(
+            signature_bytes.len(),
+            1563,
+            "Signature should be 1563 bytes"
+        );
 
         let result = verify_request_signature(&account_id_hex, &pubkey_hex, &signature_hex);
 
-        assert!(result.is_ok(), "Signature verification should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Signature verification should succeed: {result:?}"
+        );
     }
 
     #[test]
     fn test_falcon_verify_with_wrong_pubkey() {
-        use miden_objects::account::{AccountIdVersion, AccountType, AccountStorageMode};
+        use miden_objects::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key1 = SecretKey::new();
         let secret_key2 = SecretKey::new();
@@ -152,7 +156,8 @@ mod tests {
         );
         let account_id_hex = account_id.to_hex();
 
-        let message = account_id_to_digest(&account_id_hex).expect("Failed to create message digest");
+        let message =
+            account_id_to_digest(&account_id_hex).expect("Failed to create message digest");
 
         // Sign with secret_key1
         let signature = secret_key1.sign(message);
@@ -160,16 +165,19 @@ mod tests {
         // Try to verify with public_key2 (wrong key)
         let pubkey_word: Word = public_key2.into();
         let pubkey_hex = format!("0x{}", hex::encode(pubkey_word.to_bytes()));
-        let signature_hex = format!("0x{}", hex::encode(&signature.to_bytes()));
+        let signature_hex = format!("0x{}", hex::encode(signature.to_bytes()));
 
         let result = verify_request_signature(&account_id_hex, &pubkey_hex, &signature_hex);
 
-        assert!(result.is_err(), "Signature verification should fail with wrong public key");
+        assert!(
+            result.is_err(),
+            "Signature verification should fail with wrong public key"
+        );
     }
 
     #[test]
     fn test_falcon_verify_with_wrong_message() {
-        use miden_objects::account::{AccountIdVersion, AccountType, AccountStorageMode};
+        use miden_objects::account::{AccountIdVersion, AccountStorageMode, AccountType};
 
         let secret_key = SecretKey::new();
         let public_key = secret_key.public_key();
@@ -190,16 +198,20 @@ mod tests {
         let account_id2_hex = account_id2.to_hex();
 
         // Sign account_id1
-        let message1 = account_id_to_digest(&account_id1_hex).expect("Failed to create message digest");
+        let message1 =
+            account_id_to_digest(&account_id1_hex).expect("Failed to create message digest");
         let signature = secret_key.sign(message1);
 
         // Try to verify signature for account_id2 (different message)
         let pubkey_word: Word = public_key.into();
         let pubkey_hex = format!("0x{}", hex::encode(pubkey_word.to_bytes()));
-        let signature_hex = format!("0x{}", hex::encode(&signature.to_bytes()));
+        let signature_hex = format!("0x{}", hex::encode(signature.to_bytes()));
 
         let result = verify_request_signature(&account_id2_hex, &pubkey_hex, &signature_hex);
 
-        assert!(result.is_err(), "Signature verification should fail with wrong message");
+        assert!(
+            result.is_err(),
+            "Signature verification should fail with wrong message"
+        );
     }
 }

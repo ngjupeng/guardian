@@ -1,19 +1,22 @@
-use crate::auth::AuthType;
-use crate::services::{self, AuthData, ConfigureAccountParams, PushDeltaParams, GetDeltaParams, GetDeltaHeadParams, GetStateParams};
+use crate::auth::{Auth, Credentials};
+use crate::services::{
+    self, ConfigureAccountParams, GetDeltaHeadParams, GetDeltaParams, GetStateParams,
+    PushDeltaParams,
+};
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject};
 use axum::{
+    Json,
     extract::Query,
     extract::State,
     http::{HeaderMap, StatusCode},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct ConfigureRequest {
     pub account_id: String,
-    pub auth_type: AuthType,
+    pub auth: Auth,
     pub initial_state: serde_json::Value,
     pub storage_type: String,
     #[serde(default)]
@@ -24,7 +27,7 @@ impl From<ConfigureRequest> for ConfigureAccountParams {
     fn from(req: ConfigureRequest) -> Self {
         Self {
             account_id: req.account_id,
-            auth_type: req.auth_type,
+            auth: req.auth,
             initial_state: req.initial_state,
             storage_type: req.storage_type,
             cosigner_pubkeys: req.cosigner_pubkeys,
@@ -65,9 +68,8 @@ pub struct DeltaHeadResponse {
     pub message: Option<String>,
 }
 
-
-/// Extract authentication data from HTTP headers
-fn extract_auth(headers: &HeaderMap) -> Result<AuthData, String> {
+/// Extract authentication credentials from HTTP headers
+fn extract_auth(headers: &HeaderMap) -> Result<Credentials, String> {
     let pubkey = headers
         .get("x-pubkey")
         .ok_or_else(|| "Missing x-pubkey header".to_string())?
@@ -82,9 +84,8 @@ fn extract_auth(headers: &HeaderMap) -> Result<AuthData, String> {
         .map_err(|_| "Invalid x-signature header".to_string())?
         .to_string();
 
-    Ok(AuthData { pubkey, signature })
+    Ok(Credentials::signature(pubkey, signature))
 }
-
 
 pub async fn configure(
     State(state): State<AppState>,
@@ -125,13 +126,13 @@ pub async fn push_delta(
                     account_id: e,
                     ..Default::default()
                 }),
-            )
+            );
         }
     };
 
     let params = PushDeltaParams {
         delta: payload,
-        auth,
+        credentials: auth,
     };
 
     match services::push_delta(&state, params).await {
@@ -161,14 +162,14 @@ pub async fn get_delta(
                     account_id: e,
                     ..Default::default()
                 }),
-            )
+            );
         }
     };
 
     let params = GetDeltaParams {
         account_id: query.account_id,
         nonce: query.nonce,
-        auth,
+        credentials: auth,
     };
 
     match services::get_delta(&state, params).await {
@@ -199,13 +200,13 @@ pub async fn get_delta_head(
                     latest_nonce: None,
                     message: Some(e),
                 }),
-            )
+            );
         }
     };
 
     let params = GetDeltaHeadParams {
         account_id: query.account_id,
-        auth,
+        credentials: auth,
     };
 
     match services::get_delta_head(&state, params).await {
@@ -243,13 +244,13 @@ pub async fn get_state(
                     account_id: e,
                     ..Default::default()
                 }),
-            )
+            );
         }
     };
 
     let params = GetStateParams {
         account_id: query.account_id,
-        auth,
+        credentials: auth,
     };
 
     match services::get_state(&state, params).await {

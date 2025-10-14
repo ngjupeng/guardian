@@ -1,5 +1,5 @@
-use miden_objects::crypto::dsa::rpo_falcon512::{PublicKey, SecretKey, Signature};
 use miden_objects::Word;
+use miden_objects::crypto::dsa::rpo_falcon512::{PublicKey, SecretKey, Signature};
 
 /// Generate a new Falcon RPO-512 key pair
 ///
@@ -90,6 +90,9 @@ mod tests {
 
         // Try to verify with second public key
         let is_valid = verify_signature(&public_key2, message, &signature);
-        assert!(!is_valid, "Signature should be invalid for wrong public key");
+        assert!(
+            !is_valid,
+            "Signature should be invalid for wrong public key"
+        );
     }
 }
