@@ -1,3 +1,4 @@
+use crate::auth::AuthType;
 use crate::services;
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject};
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize)]
 pub struct ConfigureRequest {
     pub account_id: String,
+    pub auth_type: AuthType,
     pub initial_state: serde_json::Value,
     pub storage_type: String,
     #[serde(default)]
@@ -57,6 +59,7 @@ pub async fn configure(
     match services::configure_account(
         &state,
         payload.account_id.clone(),
+        payload.auth_type,
         payload.initial_state,
         payload.storage_type,
         payload.cosigner_pubkeys,

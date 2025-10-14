@@ -23,9 +23,10 @@ service StateManager {
 // Configure request
 message ConfigureRequest {
   string account_id = 1;
-  string initial_state = 2; // JSON string
-  string storage_type = 3;
-  repeated string cosigner_pubkeys = 4;
+  string auth_type = 2; // Auth type: "MidenFalconRpo", etc.
+  string initial_state = 3; // JSON string
+  string storage_type = 4;
+  repeated string cosigner_pubkeys = 5;
 }
 
 message ConfigureResponse {

@@ -1,3 +1,4 @@
+use crate::auth::AuthType;
 use crate::services;
 use crate::state::AppState;
 use crate::storage::DeltaObject;
@@ -27,6 +28,10 @@ impl StateManager for StateManagerService {
     ) -> Result<Response<ConfigureResponse>, Status> {
         let req = request.into_inner();
 
+        // Parse auth_type
+        let auth_type: AuthType = serde_json::from_str(&format!("\"{}\"", req.auth_type))
+            .map_err(|e| Status::invalid_argument(format!("Invalid auth_type: {}", e)))?;
+
         // Parse initial_state JSON
         let initial_state: serde_json::Value = serde_json::from_str(&req.initial_state)
             .map_err(|e| Status::invalid_argument(format!("Invalid initial_state JSON: {}", e)))?;
@@ -35,6 +40,7 @@ impl StateManager for StateManagerService {
         match services::configure_account(
             &self.app_state,
             req.account_id.clone(),
+            auth_type,
             initial_state,
             req.storage_type,
             req.cosigner_pubkeys,

@@ -3,6 +3,7 @@ pub use private_state_manager_shared::{FromJson, ToJson};
 use axum::{routing::get, routing::post, Router};
 use tonic::transport::Server;
 
+pub mod auth;
 pub mod config;
 pub mod grpc;
 pub mod http;

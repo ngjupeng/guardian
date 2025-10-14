@@ -1,3 +1,4 @@
+use crate::auth::AuthType;
 use crate::metadata::AccountMetadata;
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject};
@@ -21,6 +22,7 @@ impl ServiceError {
 pub async fn configure_account(
     state: &AppState,
     account_id: String,
+    auth_type: AuthType,
     initial_state: serde_json::Value,
     storage_type: String,
     cosigner_pubkeys: Vec<String>,
@@ -51,6 +53,7 @@ pub async fn configure_account(
     // Create and store metadata
     let metadata_entry = AccountMetadata {
         account_id: account_id.clone(),
+        auth_type,
         storage_type,
         cosigner_pubkeys,
         created_at: account_state.created_at.clone(),
@@ -65,17 +68,24 @@ pub async fn configure_account(
 
 /// Push a delta
 pub async fn push_delta(state: &AppState, delta: DeltaObject) -> ServiceResult<DeltaObject> {
-    // Verify account exists
+    // Verify account exists and get auth type
     let metadata = state.metadata.lock().await;
-    metadata.get_account(&delta.account_id).await
+    let account_metadata = metadata.get_account(&delta.account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to check account: {}", e)))?
         .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", delta.account_id)))?;
+    let auth = account_metadata.auth_type.clone();
     drop(metadata);
 
-    // TODO: Verify publisher_signature
+    // Verify publisher signature using the account's auth type
+    auth.verify_signature(
+        &delta.account_id,
+        &delta.publisher_pubkey,
+        &delta.publisher_sig,
+    )
+    .map_err(|e| ServiceError::new(format!("Signature verification failed: {}", e)))?;
+
     // TODO: Verify prev_commitment matches current state commitment
     // TODO: Verify delta_hash vs on-chain commitment
-    // TODO: Verify nonce is valid (could check against on-chain or validate it doesn't already exist)
 
     // Submit delta to storage
     state.storage.submit_delta(&delta).await
@@ -91,12 +101,21 @@ pub async fn get_delta(
     account_id: &str,
     nonce: u64,
 ) -> ServiceResult<DeltaObject> {
-    // Verify account exists
+    // Verify account exists and get auth type
     let metadata = state.metadata.lock().await;
-    metadata.get_account(account_id).await
+    let account_metadata = metadata.get_account(&account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to check account: {}", e)))?
         .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", account_id)))?;
+    let auth = account_metadata.auth_type.clone();
     drop(metadata);
+
+    // // Verify publisher signature using the account's auth type
+    // auth.verify_signature(
+    //     account_id,
+    //     &delta.publisher_pubkey,
+    //     &delta.publisher_sig,
+    // )
+    // .map_err(|e| ServiceError::new(format!("Signature verification failed: {}", e)))?;
 
     // Fetch delta from storage
     let delta = state.storage.pull_delta(account_id, nonce).await
@@ -107,14 +126,22 @@ pub async fn get_delta(
 
 /// Get the latest delta (head) for an account
 pub async fn get_delta_head(state: &AppState, account_id: &str) -> ServiceResult<DeltaObject> {
-    // Verify account exists
+    // Verify account exists and get auth type
     let metadata = state.metadata.lock().await;
-    metadata.get_account(account_id).await
+    let account_metadata = metadata.get_account(&account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to check account: {}", e)))?
         .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", account_id)))?;
+    let auth = account_metadata.auth_type.clone();
     drop(metadata);
 
-    // Get list of deltas
+    // // Verify publisher signature using the account's auth type
+    // auth.verify_signature(
+    //     account_id,
+    //     &delta.publisher_pubkey,
+    //     &delta.publisher_sig,
+    // )
+    // .map_err(|e| ServiceError::new(format!("Signature verification failed: {}", e)))?;
+
     let delta_files = state.storage.list_deltas(account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to list deltas: {}", e)))?;
 
@@ -144,14 +171,22 @@ pub async fn get_delta_head(state: &AppState, account_id: &str) -> ServiceResult
 
 /// Get the latest nonce for an account (returns None if no deltas exist)
 pub async fn get_latest_nonce(state: &AppState, account_id: &str) -> ServiceResult<Option<u64>> {
-    // Verify account exists
+    // Verify account exists and get auth type
     let metadata = state.metadata.lock().await;
-    metadata.get_account(account_id).await
+    let account_metadata = metadata.get_account(&account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to check account: {}", e)))?
         .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", account_id)))?;
+    let auth = account_metadata.auth_type.clone();
     drop(metadata);
 
-    // Get list of deltas
+    // // Verify publisher signature using the account's auth type
+    // auth.verify_signature(
+    //     account_id,
+    //     &delta.publisher_pubkey,
+    //     &delta.publisher_sig,
+    // )
+    // .map_err(|e| ServiceError::new(format!("Signature verification failed: {}", e)))?;
+
     let delta_files = state.storage.list_deltas(account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to list deltas: {}", e)))?;
 
@@ -174,14 +209,22 @@ pub async fn get_latest_nonce(state: &AppState, account_id: &str) -> ServiceResu
 
 /// Get account state
 pub async fn get_state(state: &AppState, account_id: &str) -> ServiceResult<AccountState> {
-    // Verify account exists
+    // Verify account exists and get auth type
     let metadata = state.metadata.lock().await;
-    metadata.get_account(account_id).await
+    let account_metadata = metadata.get_account(&account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to check account: {}", e)))?
-        .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", account_id)))?;
+        .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", &account_id)))?;
+    let auth = account_metadata.auth_type.clone();
     drop(metadata);
 
-    // Fetch state from storage
+    // // Verify publisher signature using the account's auth type
+    // auth.verify_signature(
+    //     account_id,
+    //     &delta.publisher_pubkey,
+    //     &delta.publisher_sig,
+    // )
+    // .map_err(|e| ServiceError::new(format!("Signature verification failed: {}", e)))?;
+
     let account_state = state.storage.pull_state(account_id).await
         .map_err(|e| ServiceError::new(format!("Failed to fetch state: {}", e)))?;
 

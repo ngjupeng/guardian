@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::auth::AuthType;
 use crate::http::ConfigureRequest;
 
 pub mod file_store;
@@ -10,6 +11,7 @@ pub mod file_store;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AccountMetadata {
     pub account_id: String,
+    pub auth_type: AuthType,
     pub storage_type: String,
     pub cosigner_pubkeys: Vec<String>,
     pub created_at: String,
@@ -20,6 +22,7 @@ impl From<&ConfigureRequest> for AccountMetadata {
     fn from(request: &ConfigureRequest) -> Self {
         Self {
             account_id: request.account_id.clone(),
+            auth_type: request.auth_type.clone(),
             storage_type: request.storage_type.clone(),
             cosigner_pubkeys: request.cosigner_pubkeys.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
