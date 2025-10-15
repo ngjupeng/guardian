@@ -65,6 +65,21 @@ Run gRPC E2E tests:
 cargo test --package private-state-manager-server --test e2e_grpc_auth_test -- --test-threads=1
 ```
 
+### Reproducible Builds
+
+The server binary has reproducible builds. The same source code and build environment always produces bit-for-bit identical binaries.
+
+Test reproducibility:
+
+```bash
+./tests/test-reproducibility.sh
+```
+
+This builds the server twice in Docker and verifies the binaries are identical. Reproducible builds enable:
+- Binary verification against source code
+- Supply chain security
+- Build integrity validation
+
 ## Manual Testing
 
 ### HTTP with curl
