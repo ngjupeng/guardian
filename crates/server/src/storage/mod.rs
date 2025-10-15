@@ -125,7 +125,10 @@ impl StorageRegistry {
         let fs_storage = FilesystemService::new(storage_path).await?;
 
         let mut backends = HashMap::new();
-        backends.insert(StorageType::Filesystem, Arc::new(fs_storage) as Arc<dyn StorageBackend>);
+        backends.insert(
+            StorageType::Filesystem,
+            Arc::new(fs_storage) as Arc<dyn StorageBackend>,
+        );
 
         Ok(Self::new(backends))
     }
@@ -135,6 +138,6 @@ impl StorageRegistry {
         self.backends
             .get(storage_type)
             .cloned()
-            .ok_or_else(|| format!("No storage backend registered for type: {}", storage_type))
+            .ok_or_else(|| format!("No storage backend registered for type: {storage_type}"))
     }
 }

@@ -2,8 +2,8 @@ pub use private_state_manager_shared::{FromJson, ToJson};
 
 use server::builder::ServerBuilder;
 use server::network::NetworkType;
-use server::storage::filesystem::FilesystemMetadataStore;
 use server::storage::StorageRegistry;
+use server::storage::filesystem::FilesystemMetadataStore;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
