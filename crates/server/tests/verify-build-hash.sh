@@ -54,7 +54,7 @@ fi
 # Build the Docker image
 echo "Building server in Docker..."
 echo ""
-docker build --platform "$PLATFORM" -t psm-server-verify . --no-cache --quiet
+docker build --platform "$PLATFORM" -t psm-server-verify . --no-cache --progress=plain 2>&1 | grep -v "jemalloc" | grep -v "MADV_DONTNEED" | grep -v "QEMU"
 
 # Extract binary to temp location
 BUILD_DIR=$(mktemp -d)
