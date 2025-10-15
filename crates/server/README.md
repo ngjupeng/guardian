@@ -67,39 +67,29 @@ cargo test --package private-state-manager-server --test e2e_grpc_auth_test -- -
 
 ### Reproducible Builds
 
-The server binary has reproducible builds. The same source code and build environment always produces bit-for-bit identical binaries across different machines and platforms.
+The server binary has reproducible builds. Building from the same source code and target architecture always produces bit-for-bit identical binaries, regardless of the build machine.
 
-#### Pinned Dependencies
+#### Verifying Published Binaries
 
-All build dependencies are pinned for reproducibility:
-- **Rust**: 1.88.0 (via `rust-toolchain.toml`)
-- **Docker base image**: `rust:1.88@sha256:af306cfa...` (pinned by digest)
-- **Protobuf compiler**: 3.21.12-3 (pinned Debian package version)
-- **Build flags**: Configured in `.cargo/config.toml` for deterministic compilation
+To verify a published binary matches the source code:
 
-#### Verifying Reproducibility
+1. Build for the target architecture and compare hashes:
+   ```bash
+   ./crates/server/tests/verify-build-hash.sh
+   # Compare SHA256 output with published release hash
+   ```
 
-Build and get the hash (run from repository root):
+2. If hashes match, the binary is verified authentic.
 
 ```bash
-# Build for linux/amd64 (default)
+# Build for linux/amd64 (default - matches official releases)
 ./crates/server/tests/verify-build-hash.sh
 
-# Or build for linux/arm64
+# Build for linux/arm64
 PLATFORM=linux/arm64 ./crates/server/tests/verify-build-hash.sh
 ```
 
-**Important**: Binaries are architecture-specific. To verify reproducibility across machines:
-1. Choose a target platform (e.g., `linux/amd64`)
-2. Build using the **same platform** on all machines
-3. Compare the SHA256 hashes - they should match exactly
-
-Example:
-```bash
-# Machine 1 (macOS ARM):   PLATFORM=linux/amd64 ./crates/server/tests/verify-build-hash.sh
-# Machine 2 (Linux x86_64): PLATFORM=linux/amd64 ./crates/server/tests/verify-build-hash.sh
-# → Both should produce the same hash
-```
+**Note**: Different architectures produce different binaries and hashes. For cross-machine verification, use the same target architecture on all machines.
 
 #### Benefits
 
