@@ -10,10 +10,6 @@ use miden_objects::{Felt, FieldElement, Word};
 /// * `account_id` - The account ID (hex-encoded)
 /// * `pubkey` - The public key (hex-encoded)
 /// * `signature` - The signature to verify (hex-encoded)
-///
-/// # Returns
-/// * `Ok(())` if signature is valid
-/// * `Err(String)` with error message otherwise
 pub fn verify_request_signature(
     account_id: &str,
     pubkey: &str,
@@ -65,8 +61,6 @@ fn account_id_to_digest(account_id_hex: &str) -> Result<Word, String> {
 /// # Arguments
 /// * `hex_str` - Hex-encoded public key, format: "0x" + 64 hex chars (32 bytes)
 fn parse_public_key(hex_str: &str) -> Result<PublicKey, String> {
-    // Use Miden's Word::try_from to parse the hex string directly
-    // This handles hex decoding, byte-to-felt conversion, and field element validation
     let word = Word::try_from(hex_str).map_err(|e| format!("Invalid public key hex: {e}"))?;
 
     // Convert Word to PublicKey
