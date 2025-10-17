@@ -1,41 +1,11 @@
-//! Minimal Miden RPC client using tonic-generated code from miden-node proto definitions
+//! Minimal Miden RPC client using miden-node-proto crate
+use miden_objects::{account::AccountId, utils::Serializable};
+use tonic::{Request,transport::{Channel, ClientTlsConfig}};
 
-use miden_objects::account::AccountId;
-use miden_objects::utils::Serializable;
-
-// Include ALL generated proto code from miden-node
-// Tonic generates one file per package
-pub mod account {
-    tonic::include_proto!("account");
-}
-pub mod blockchain {
-    tonic::include_proto!("blockchain");
-}
-pub mod note {
-    tonic::include_proto!("note");
-}
-pub mod primitives {
-    tonic::include_proto!("primitives");
-}
-pub mod transaction {
-    tonic::include_proto!("transaction");
-}
-pub mod block_producer {
-    tonic::include_proto!("block_producer");
-}
-pub mod rpc_store {
-    tonic::include_proto!("rpc_store");
-}
-pub mod shared {
-    tonic::include_proto!("shared");
-}
-pub mod rpc {
-    tonic::include_proto!("rpc");
-}
-
+pub use miden_node_proto::generated::{
+    account, block_producer, blockchain, note, primitives, rpc, rpc_store, shared, transaction,
+};
 pub use rpc::api_client::ApiClient;
-
-use tonic::transport::Channel;
 
 /// Simple wrapper around the tonic-generated ApiClient
 pub struct MidenRpcClient {
@@ -48,7 +18,7 @@ impl MidenRpcClient {
 
         let channel = Channel::from_shared(endpoint_str.clone())
             .map_err(|e| format!("Invalid endpoint: {}", e))?
-            .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
+            .tls_config(ClientTlsConfig::new().with_native_roots())
             .map_err(|e| format!("TLS config error: {}", e))?
             .connect()
             .await
@@ -68,7 +38,7 @@ impl MidenRpcClient {
     pub async fn get_status(&mut self) -> Result<rpc::RpcStatus, String> {
         let response = self
             .client
-            .status(tonic::Request::new(()))
+            .status(Request::new(()))
             .await
             .map_err(|e| format!("Status RPC failed: {}", e))?;
 
@@ -88,7 +58,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
-            .get_block_header_by_number(tonic::Request::new(request))
+            .get_block_header_by_number(Request::new(request))
             .await
             .map_err(|e| format!("GetBlockHeaderByNumber RPC failed: {}", e))?;
 
@@ -106,7 +76,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
-            .submit_proven_transaction(tonic::Request::new(request))
+            .submit_proven_transaction(Request::new(request))
             .await
             .map_err(|e| format!("SubmitProvenTransaction RPC failed: {}", e))?;
 
@@ -130,7 +100,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
-            .sync_state(tonic::Request::new(request))
+            .sync_state(Request::new(request))
             .await
             .map_err(|e| format!("SyncState RPC failed: {}", e))?;
 
@@ -146,7 +116,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
-            .check_nullifiers(tonic::Request::new(request))
+            .check_nullifiers(Request::new(request))
             .await
             .map_err(|e| format!("CheckNullifiers RPC failed: {}", e))?;
 
@@ -163,7 +133,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
-            .get_notes_by_id(tonic::Request::new(request))
+            .get_notes_by_id(Request::new(request))
             .await
             .map_err(|e| format!("GetNotesById RPC failed: {}", e))?;
 
@@ -177,7 +147,7 @@ impl MidenRpcClient {
     ) -> Result<String, String> {
         let account_id_bytes = account_id.to_bytes();
 
-        let request = tonic::Request::new(account::AccountId {
+        let request = Request::new(account::AccountId {
             id: account_id_bytes.to_vec(),
         });
 
@@ -215,7 +185,7 @@ impl MidenRpcClient {
     ) -> Result<account::AccountDetails, String> {
         let account_id_bytes = account_id.to_bytes();
 
-        let request = tonic::Request::new(account::AccountId {
+        let request = Request::new(account::AccountId {
             id: account_id_bytes.to_vec(),
         });
 
