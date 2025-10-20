@@ -37,14 +37,22 @@ pub async fn push_delta(
         &params.credentials,
     )?;
 
-    // TODO: Verify prev_commitment matches current state commitment
-    // TODO: Verify new commitment vs on-chain commitment in time window.
-
     // Get the storage backend for this account
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
         .map_err(ServiceError::new)?;
+
+    // Verify delta payload is valid by attempting to deserialize as AccountDelta
+    {
+        let client = state.network_client.lock().await;
+        client
+            .verify_delta(&params.delta.delta_payload)
+            .map_err(|e| ServiceError::new(format!("Invalid delta payload: {e}")))?;
+    }
+
+    // TODO: verify nonce is greater than the max nonce for the account
+    // TODO: Verify prev_commitment matches current state commitment
 
     // Submit delta to storage
     storage_backend
@@ -52,6 +60,9 @@ pub async fn push_delta(
         .await
         .map_err(|e| ServiceError::new(format!("Failed to submit delta: {e}")))?;
 
+
+    // TODO: Verify new commitment vs on-chain commitment in time window.
+    
     // TODO: Create ack signature
     Ok(PushDeltaResult {
         delta: params.delta,

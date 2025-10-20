@@ -1,5 +1,5 @@
 use crate::network::NetworkType;
-use miden_objects::account::{Account, AccountId};
+use miden_objects::account::{Account, AccountDelta, AccountId};
 use miden_rpc_client::MidenRpcClient;
 use private_state_manager_shared::FromJson;
 
@@ -65,6 +65,12 @@ impl MidenNetworkClient {
         account_id: &AccountId,
     ) -> Result<String, String> {
         self.client.get_account_commitment(account_id).await
+    }
+
+    /// Verify that a delta payload is valid by attempting to deserialize it as an AccountDelta.
+    pub fn verify_delta(&self, delta_payload: &serde_json::Value) -> Result<(), String> {
+        AccountDelta::from_json(delta_payload)?;
+        Ok(())
     }
 
     /// Construct an Account object from JSON state representation
@@ -211,5 +217,92 @@ mod tests {
                 .unwrap_err()
                 .contains("Invalid Miden account ID format")
         );
+    }
+
+    #[tokio::test]
+    async fn test_verify_delta_invalid_missing_data_field() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        let invalid_delta = serde_json::json!({"changes": ["balance_update"]});
+
+        let result = client.verify_delta(&invalid_delta);
+        assert!(result.is_err(), "Should fail with missing 'data' field");
+        assert!(
+            result.unwrap_err().contains("data"),
+            "Error should mention missing 'data' field"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_delta_invalid_base64() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        let invalid_delta = serde_json::json!({"data": "not_valid_base64!!!"});
+
+        let result = client.verify_delta(&invalid_delta);
+        assert!(result.is_err(), "Should fail with invalid base64");
+        assert!(
+            result.unwrap_err().contains("Base64 decode error"),
+            "Error should mention base64 decode error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_delta_invalid_bytes() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        // Valid base64 but invalid AccountDelta bytes
+        let invalid_delta = serde_json::json!({"data": "aGVsbG8gd29ybGQ="});
+
+        let result = client.verify_delta(&invalid_delta);
+        assert!(result.is_err(), "Should fail with invalid AccountDelta bytes");
+        assert!(
+            result.unwrap_err().contains("deserialization error"),
+            "Error should mention deserialization error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_delta_with_fixture() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        // Load delta fixture
+        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("delta.json");
+
+        let fixture_contents = match std::fs::read_to_string(&fixture_path) {
+            Ok(contents) => contents,
+            Err(_) => {
+                println!("⚠️  Delta fixture not found - skipping test.");
+                return;
+            }
+        };
+
+        let delta_json: serde_json::Value =
+            serde_json::from_str(&fixture_contents).expect("Failed to parse delta fixture");
+
+        // Verify the fixture is a valid delta
+        let result = client.verify_delta(&delta_json);
+        assert!(
+            result.is_ok(),
+            "Delta fixture should be valid: {:?}",
+            result.err()
+        );
+
+        println!("✓ Delta fixture validation passed!");
     }
 }

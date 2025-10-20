@@ -50,12 +50,8 @@ message PushDeltaRequest {
   string account_id = 1;
   uint64 nonce = 2;
   string prev_commitment = 3;
-  string delta_hash = 4;
+  string new_commitment = 4;
   string delta_payload = 5; // JSON string
-  string ack_sig = 6;
-  string candidate_at = 7;
-  optional string canonical_at = 8;
-  optional string discarded_at = 9;
 }
 
 message PushDeltaResponse {
@@ -103,7 +99,7 @@ message DeltaObject {
   string account_id = 1;
   uint64 nonce = 2;
   string prev_commitment = 3;
-  string delta_hash = 4;
+  string new_commitment = 4;
   string delta_payload = 5; // JSON string
   string ack_sig = 6;
   string candidate_at = 7;

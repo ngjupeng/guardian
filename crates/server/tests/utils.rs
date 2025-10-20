@@ -7,11 +7,12 @@ pub mod test_helpers {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use miden_objects::account::AccountId;
+    use miden_objects::account::{AccountDelta, AccountId, AccountStorageDelta, AccountVaultDelta};
     use miden_objects::crypto::dsa::rpo_falcon512::SecretKey;
     use miden_objects::crypto::hash::rpo::Rpo256;
     use miden_objects::utils::Serializable;
     use miden_objects::{Felt, FieldElement, Word};
+    use private_state_manager_shared::ToJson;
 
     use server::api::grpc::StateManagerService;
     use server::network::NetworkType;
@@ -148,6 +149,47 @@ pub mod test_helpers {
         let account_id_hex = "0x8a65fc5a39e4cd106d648e3eb4ab5f";
         let account_id = AccountId::from_hex(account_id_hex).expect("Valid account ID");
         (account_id, account_id_hex.to_string())
+    }
+
+    /// Load the test delta fixture from fixtures/delta.json
+    pub fn load_fixture_delta() -> (AccountId, String, serde_json::Value) {
+        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("delta.json");
+
+        let fixture_contents =
+            std::fs::read_to_string(&fixture_path).expect("Failed to read delta fixture file");
+
+        let fixture_json: serde_json::Value =
+            serde_json::from_str(&fixture_contents).expect("Failed to parse delta fixture JSON");
+
+        let account_id_hex = fixture_json["account_id"]
+            .as_str()
+            .expect("No account_id in delta fixture")
+            .to_string();
+
+        let account_id =
+            AccountId::from_hex(&account_id_hex).expect("Invalid account ID in delta fixture");
+
+        (account_id, account_id_hex, fixture_json)
+    }
+
+    /// Create a test AccountDelta JSON payload with valid base64-encoded delta bytes
+    /// This creates an in-memory delta for the given account ID
+    pub fn create_test_delta_payload(account_id_hex: &str) -> serde_json::Value {
+        let account_id = AccountId::from_hex(account_id_hex).expect("Valid account ID");
+
+        // Create an empty delta (no storage or vault changes, nonce delta of 0)
+        let delta = AccountDelta::new(
+            account_id,
+            AccountStorageDelta::default(),
+            AccountVaultDelta::default(),
+            Felt::ZERO,
+        )
+        .expect("Valid empty delta");
+
+        delta.to_json()
     }
 
     /// Generate a Falcon key pair and signature for the given account ID

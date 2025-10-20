@@ -1,5 +1,5 @@
 use base64::Engine;
-use miden_objects::account::Account;
+use miden_objects::account::{Account, AccountDelta};
 use miden_objects::utils::serde::{Deserializable, Serializable};
 
 pub mod auth;
@@ -35,6 +35,32 @@ impl FromJson for Account {
             .map_err(|e| format!("Base64 decode error: {e}"))?;
 
         Account::read_from_bytes(&bytes).map_err(|e| format!("Deserialization error: {e}"))
+    }
+}
+
+impl ToJson for AccountDelta {
+    fn to_json(&self) -> serde_json::Value {
+        let bytes = self.to_bytes();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        serde_json::json!({
+          "data": encoded,
+        })
+    }
+}
+
+impl FromJson for AccountDelta {
+    fn from_json(json: &serde_json::Value) -> Result<Self, String> {
+        let encoded = json
+            .get("data")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing or invalid 'data' field in delta payload")?;
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| format!("Base64 decode error: {e}"))?;
+
+        AccountDelta::read_from_bytes(&bytes)
+            .map_err(|e| format!("AccountDelta deserialization error: {e}"))
     }
 }
 

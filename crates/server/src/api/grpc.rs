@@ -85,12 +85,12 @@ impl StateManager for StateManagerService {
             account_id: req.account_id,
             nonce: req.nonce,
             prev_commitment: req.prev_commitment,
-            delta_hash: req.delta_hash,
+            new_commitment: req.new_commitment,
             delta_payload,
-            ack_sig: req.ack_sig,
-            candidate_at: req.candidate_at,
-            canonical_at: req.canonical_at,
-            discarded_at: req.discarded_at,
+            ack_sig: None,
+            candidate_at: None,
+            canonical_at: None,
+            discarded_at: None,
         };
 
         let params = PushDeltaParams {
@@ -208,10 +208,10 @@ fn delta_to_proto(delta: &DeltaObject) -> state_manager::DeltaObject {
         account_id: delta.account_id.clone(),
         nonce: delta.nonce,
         prev_commitment: delta.prev_commitment.clone(),
-        delta_hash: delta.delta_hash.clone(),
+        new_commitment: delta.new_commitment.clone(),
         delta_payload: delta.delta_payload.to_string(),
-        ack_sig: delta.ack_sig.clone(),
-        candidate_at: delta.candidate_at.clone(),
+        ack_sig: delta.ack_sig.clone().unwrap_or_default(),
+        candidate_at: delta.candidate_at.clone().unwrap_or_default(),
         canonical_at: delta.canonical_at.clone(),
         discarded_at: delta.discarded_at.clone(),
     }

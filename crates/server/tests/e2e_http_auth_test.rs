@@ -1,6 +1,7 @@
 mod utils;
 use utils::test_helpers::{
-    create_router, create_test_app_state, generate_falcon_signature, load_fixture_account,
+    create_router, create_test_app_state, create_test_delta_payload, generate_falcon_signature,
+    load_fixture_account,
 };
 
 use axum::{
@@ -47,16 +48,13 @@ async fn test_configure_and_push_delta_with_auth() {
     );
 
     // Step 2: Push a delta with authentication headers
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let delta_body = json!({
         "account_id": account_id_hex,
         "nonce": 1,
         "prev_commitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "delta_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "delta_payload": {
-            "changes": ["balance_update"]
-        },
-        "ack_sig": "",
-        "candidate_at": "2024-01-01T00:00:00Z"
+        "new_commitment": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "delta_payload": delta_payload
     });
 
     let push_request = Request::builder()
@@ -114,16 +112,13 @@ async fn test_push_delta_unauthorized_cosigner() {
     assert_eq!(configure_response.status(), StatusCode::OK);
 
     // Try to push delta with UNAUTHORIZED key
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let delta_body = json!({
         "account_id": account_id_hex,
         "nonce": 1,
         "prev_commitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "delta_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "delta_payload": {
-            "changes": ["balance_update"]
-        },
-        "ack_sig": "",
-        "candidate_at": "2024-01-01T00:00:00Z"
+        "new_commitment": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "delta_payload": delta_payload
     });
 
     let push_request = Request::builder()
@@ -179,16 +174,13 @@ async fn test_push_delta_missing_auth_headers() {
     assert_eq!(configure_response.status(), StatusCode::OK);
 
     // Try to push delta WITHOUT auth headers
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let delta_body = json!({
         "account_id": account_id_hex,
         "nonce": 1,
         "prev_commitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "delta_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "delta_payload": {
-            "changes": ["balance_update"]
-        },
-        "ack_sig": "",
-        "candidate_at": "2024-01-01T00:00:00Z"
+        "new_commitment": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "delta_payload": delta_payload
     });
 
     let push_request = Request::builder()

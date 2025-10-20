@@ -3,7 +3,7 @@ use utils::test_helpers::*;
 
 use server::api::grpc::state_manager::state_manager_server::StateManager;
 use server::api::grpc::state_manager::{ConfigureRequest, GetDeltaRequest, PushDeltaRequest};
-use utils::test_helpers::load_fixture_account_grpc as load_fixture_account;
+use utils::test_helpers::{create_test_delta_payload, load_fixture_account_grpc as load_fixture_account};
 
 #[tokio::test]
 async fn test_grpc_configure_and_push_delta_with_auth() {
@@ -26,18 +26,15 @@ async fn test_grpc_configure_and_push_delta_with_auth() {
     assert!(configure_response.unwrap().into_inner().success);
 
     // Step 2: Push a delta with authentication metadata
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let push_req = PushDeltaRequest {
         account_id: account_id_hex,
         nonce: 1,
         prev_commitment: "0x0000000000000000000000000000000000000000000000000000000000000000"
             .to_string(),
-        delta_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+        new_commitment: "0x1111111111111111111111111111111111111111111111111111111111111111"
             .to_string(),
-        delta_payload: r#"{"changes": ["balance_update"]}"#.to_string(),
-        ack_sig: "".to_string(),
-        candidate_at: "2024-01-01T00:00:00Z".to_string(),
-        canonical_at: None,
-        discarded_at: None,
+        delta_payload: delta_payload.to_string(),
     };
 
     let request = create_request_with_auth(push_req, &pubkey_hex, &signature_hex);
@@ -79,18 +76,15 @@ async fn test_grpc_push_delta_unauthorized_cosigner() {
     assert!(configure_response.unwrap().into_inner().success);
 
     // Try to push delta with UNAUTHORIZED key
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let push_req = PushDeltaRequest {
         account_id: account_id_hex,
         nonce: 1,
         prev_commitment: "0x0000000000000000000000000000000000000000000000000000000000000000"
             .to_string(),
-        delta_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+        new_commitment: "0x1111111111111111111111111111111111111111111111111111111111111111"
             .to_string(),
-        delta_payload: r#"{"changes": ["balance_update"]}"#.to_string(),
-        ack_sig: "".to_string(),
-        candidate_at: "2024-01-01T00:00:00Z".to_string(),
-        canonical_at: None,
-        discarded_at: None,
+        delta_payload: delta_payload.to_string(),
     };
 
     let request = create_request_with_auth(push_req, &unauthorized_pubkey, &unauthorized_sig);
@@ -130,18 +124,15 @@ async fn test_grpc_push_delta_missing_auth_metadata() {
     assert!(configure_response.unwrap().into_inner().success);
 
     // Try to push delta WITHOUT auth metadata
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let push_req = PushDeltaRequest {
         account_id: account_id_hex,
         nonce: 1,
         prev_commitment: "0x0000000000000000000000000000000000000000000000000000000000000000"
             .to_string(),
-        delta_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+        new_commitment: "0x1111111111111111111111111111111111111111111111111111111111111111"
             .to_string(),
-        delta_payload: r#"{"changes": ["balance_update"]}"#.to_string(),
-        ack_sig: "".to_string(),
-        candidate_at: "2024-01-01T00:00:00Z".to_string(),
-        canonical_at: None,
-        discarded_at: None,
+        delta_payload: delta_payload.to_string(),
     };
 
     // Request WITHOUT auth metadata
@@ -184,18 +175,15 @@ async fn test_grpc_get_delta_with_auth() {
         .unwrap();
 
     // Push a delta
+    let delta_payload = create_test_delta_payload(&account_id_hex);
     let push_req = PushDeltaRequest {
         account_id: account_id_hex.clone(),
         nonce: 1,
         prev_commitment: "0x0000000000000000000000000000000000000000000000000000000000000000"
             .to_string(),
-        delta_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+        new_commitment: "0x1111111111111111111111111111111111111111111111111111111111111111"
             .to_string(),
-        delta_payload: r#"{"changes": ["balance_update"]}"#.to_string(),
-        ack_sig: "".to_string(),
-        candidate_at: "2024-01-01T00:00:00Z".to_string(),
-        canonical_at: None,
-        discarded_at: None,
+        delta_payload: delta_payload.to_string(),
     };
 
     service

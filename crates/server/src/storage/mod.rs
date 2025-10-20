@@ -58,10 +58,10 @@ pub struct DeltaObject {
     pub account_id: String,
     pub nonce: u64,
     pub prev_commitment: String,
-    pub delta_hash: String,
+    pub new_commitment: String,
     pub delta_payload: serde_json::Value,
-    pub ack_sig: String,
-    pub candidate_at: String,
+    pub ack_sig: Option<String>,
+    pub candidate_at: Option<String>,
     pub canonical_at: Option<String>,
     pub discarded_at: Option<String>,
 }
