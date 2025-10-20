@@ -1,6 +1,9 @@
 use miden_objects::{
-    account::{Account, AccountDelta, AccountId, delta::{AccountStorageDelta, AccountVaultDelta}},
     Felt,
+    account::{
+        Account, AccountDelta, AccountId,
+        delta::{AccountStorageDelta, AccountVaultDelta},
+    },
 };
 use private_state_manager_shared::ToJson;
 use std::fs;
@@ -14,7 +17,8 @@ async fn generate_account_and_delta_fixtures() {
         .join("fixtures")
         .join("account.json");
 
-    let fixture_contents = fs::read_to_string(&fixture_path).expect("Failed to read account fixture");
+    let fixture_contents =
+        fs::read_to_string(&fixture_path).expect("Failed to read account fixture");
     let account_json: serde_json::Value = serde_json::from_str(&fixture_contents).unwrap();
 
     let account_id_hex = account_json["account_id"].as_str().unwrap();
@@ -35,14 +39,18 @@ async fn generate_account_and_delta_fixtures() {
         AccountStorageDelta::default(),
         AccountVaultDelta::default(),
         Felt::new(1), // nonce delta: increment by 1
-    ).expect("Failed to create delta 1");
+    )
+    .expect("Failed to create delta 1");
 
     // Apply first delta
     let mut account_after_delta_1 = account.clone();
     account_after_delta_1
         .apply_delta(&delta_1)
         .expect("Failed to apply delta 1");
-    let commitment_after_delta_1 = format!("0x{}", hex::encode(account_after_delta_1.commitment().as_bytes()));
+    let commitment_after_delta_1 = format!(
+        "0x{}",
+        hex::encode(account_after_delta_1.commitment().as_bytes())
+    );
 
     println!("\nAfter delta 1:");
     println!("  Commitment: {}", commitment_after_delta_1);
@@ -75,14 +83,18 @@ async fn generate_account_and_delta_fixtures() {
         AccountStorageDelta::default(),
         AccountVaultDelta::default(),
         Felt::new(1), // nonce delta: increment by 1
-    ).expect("Failed to create delta 2");
+    )
+    .expect("Failed to create delta 2");
 
     // Apply second delta
     let mut account_after_delta_2 = account_after_delta_1.clone();
     account_after_delta_2
         .apply_delta(&delta_2)
         .expect("Failed to apply delta 2");
-    let commitment_after_delta_2 = format!("0x{}", hex::encode(account_after_delta_2.commitment().as_bytes()));
+    let commitment_after_delta_2 = format!(
+        "0x{}",
+        hex::encode(account_after_delta_2.commitment().as_bytes())
+    );
 
     println!("\nAfter delta 2:");
     println!("  Commitment: {}", commitment_after_delta_2);

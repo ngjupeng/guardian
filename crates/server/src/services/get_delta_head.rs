@@ -41,23 +41,23 @@ pub async fn get_delta_head(
         .get(&account_metadata.storage_type)
         .map_err(ServiceError::new)?;
 
-    // Get the latest nonce from storage
-    let latest_nonce = storage_backend
-        .get_delta_head(&params.account_id)
+    // Fetch all deltas and find the latest non-discarded one
+    let all_deltas = storage_backend
+        .pull_deltas_after(&params.account_id, 0)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to get latest nonce: {e}")))?
+        .map_err(|e| ServiceError::new(format!("Failed to fetch deltas: {e}")))?;
+
+    // Filter out discarded deltas and get the latest
+    let delta = all_deltas
+        .into_iter()
+        .filter(|d| d.discarded_at.is_none())
+        .max_by_key(|d| d.nonce)
         .ok_or_else(|| {
             ServiceError::new(format!(
-                "No deltas found for account '{}'",
+                "No valid deltas found for account '{}'",
                 params.account_id
             ))
         })?;
-
-    // Fetch the latest delta
-    let delta = storage_backend
-        .pull_delta(&params.account_id, latest_nonce)
-        .await
-        .map_err(|e| ServiceError::new(format!("Failed to fetch latest delta: {e}")))?;
 
     Ok(GetDeltaHeadResult { delta })
 }

@@ -60,13 +60,17 @@ impl MidenNetworkClient {
 
     /// Fetch account commitment from the Miden network
     /// Returns the commitment hash as a hex string
-    pub async fn get_account_commitment(
-        &mut self,
-        account_id: &AccountId,
-    ) -> Result<String, String> {
-        self.client.get_account_commitment(account_id).await
+    pub async fn get_account_commitment(&mut self, account_id: String) -> Result<String, String> {
+        let account_id =
+            AccountId::from_hex(&account_id).map_err(|e| format!("Invalid account ID: {e}"))?;
+        self.client.get_account_commitment(&account_id).await
     }
 
+    /// Verify that a delta payload is valid by attempting to deserialize it as an AccountDelta.
+    pub fn verify_delta(&self, delta_payload: &serde_json::Value) -> Result<(), String> {
+        AccountDelta::from_json(delta_payload)?;
+        Ok(())
+    }
 
     /// Verify delta commitments and apply the delta to the account state.
     pub fn verify_and_apply_delta(
@@ -332,7 +336,10 @@ mod tests {
         let invalid_delta = serde_json::json!({"data": "aGVsbG8gd29ybGQ="});
 
         let result = client.verify_delta(&invalid_delta);
-        assert!(result.is_err(), "Should fail with invalid AccountDelta bytes");
+        assert!(
+            result.is_err(),
+            "Should fail with invalid AccountDelta bytes"
+        );
         assert!(
             result.unwrap_err().contains("deserialization error"),
             "Error should mention deserialization error"

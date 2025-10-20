@@ -5,9 +5,7 @@ use server::api::grpc::state_manager::state_manager_server::StateManager;
 use server::api::grpc::state_manager::{
     ConfigureRequest, GetDeltaRequest, GetDeltaSinceRequest, PushDeltaRequest,
 };
-use utils::test_helpers::{
-    load_fixture_account_grpc as load_fixture_account, load_fixture_delta,
-};
+use utils::test_helpers::{load_fixture_account_grpc as load_fixture_account, load_fixture_delta};
 
 #[tokio::test]
 async fn test_grpc_configure_and_push_delta_with_auth() {
@@ -183,7 +181,11 @@ async fn test_grpc_get_delta_with_auth() {
     };
 
     service
-        .push_delta(create_request_with_auth(push_req, &pubkey_hex, &signature_hex))
+        .push_delta(create_request_with_auth(
+            push_req,
+            &pubkey_hex,
+            &signature_hex,
+        ))
         .await
         .unwrap();
 
@@ -248,7 +250,7 @@ async fn test_grpc_get_delta_since_with_auth() {
         .await
         .unwrap();
 
-    // Push second delta (nonce 2)
+    // Try to push second delta while first is still pending - should fail
     let delta_2 = load_fixture_delta(2);
     let push_req_2 = PushDeltaRequest {
         account_id: delta_2["account_id"].as_str().unwrap().to_string(),
@@ -258,16 +260,29 @@ async fn test_grpc_get_delta_since_with_auth() {
         delta_payload: serde_json::to_string(&delta_2["delta_payload"]).unwrap(),
     };
 
-    service
+    let push_result_2 = service
         .push_delta(create_request_with_auth(
             push_req_2,
             &pubkey_hex,
             &signature_hex,
         ))
         .await
-        .unwrap();
+        .expect("gRPC call should succeed");
 
-    // Get all deltas after nonce 0 (should return merged delta from nonce 1 and 2)
+    let push_response_2 = push_result_2.into_inner();
+    assert!(
+        !push_response_2.success,
+        "Should not allow pushing delta when there's a pending candidate"
+    );
+    assert!(
+        push_response_2
+            .message
+            .contains("non-canonical delta pending"),
+        "Error should mention pending delta: {}",
+        push_response_2.message
+    );
+
+    // Get delta since nonce 0 (should only return delta 1)
     let get_req = GetDeltaSinceRequest {
         account_id: account_id_hex,
         from_nonce: 0,
@@ -289,8 +304,8 @@ async fn test_grpc_get_delta_since_with_auth() {
 
     let merged_delta = get_response.merged_delta.unwrap();
     assert_eq!(
-        merged_delta.nonce, 2,
-        "Merged delta should have the latest nonce"
+        merged_delta.nonce, 1,
+        "Merged delta should only have first delta (nonce 1)"
     );
     assert_eq!(
         merged_delta.prev_commitment,
@@ -299,7 +314,7 @@ async fn test_grpc_get_delta_since_with_auth() {
     );
     assert_eq!(
         merged_delta.new_commitment,
-        delta_2["new_commitment"].as_str().unwrap(),
-        "Merged delta should have last delta's new_commitment"
+        delta_1["new_commitment"].as_str().unwrap(),
+        "Merged delta should have first delta's new_commitment"
     );
 }

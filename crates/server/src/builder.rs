@@ -6,6 +6,7 @@
 //! - Authentication methods (MidenFalconRpo, EthereumECDSA, etc.)
 //! - API protocols (HTTP, gRPC)
 
+use crate::canonicalization::CanonicalizationMode;
 use crate::network::{NetworkType, miden::MidenNetworkClient};
 use crate::state::AppState;
 use crate::storage::{MetadataStore, StorageRegistry};
@@ -17,6 +18,7 @@ pub struct ServerBuilder {
     network_type: Option<NetworkType>,
     storage: Option<StorageRegistry>,
     metadata: Option<Arc<dyn MetadataStore>>,
+    canonicalization_mode: CanonicalizationMode,
     http_enabled: bool,
     http_port: u16,
     grpc_enabled: bool,
@@ -30,6 +32,7 @@ impl ServerBuilder {
             network_type: None,
             storage: None,
             metadata: None,
+            canonicalization_mode: CanonicalizationMode::default(),
             http_enabled: true,
             http_port: 3000,
             grpc_enabled: true,
@@ -105,6 +108,33 @@ impl ServerBuilder {
     /// ```
     pub fn metadata(mut self, metadata: Arc<dyn MetadataStore>) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// Configure canonicalization mode
+    ///
+    /// # Arguments
+    /// * `mode` - The canonicalization mode to use
+    ///
+    /// # Example
+    /// ```no_run
+    /// use server::builder::ServerBuilder;
+    /// use server::canonicalization::{CanonicalizationMode, CanonicalizationConfig};
+    ///
+    /// // Enabled mode with custom timing
+    /// let config = CanonicalizationConfig::new(
+    ///     10 * 60,  // 10 minute delay
+    ///     30,       // 30 second check interval
+    /// );
+    /// let builder = ServerBuilder::new()
+    ///     .with_canonicalization(CanonicalizationMode::Enabled(config));
+    ///
+    /// // Optimistic mode - no verification
+    /// let builder = ServerBuilder::new()
+    ///     .with_canonicalization(CanonicalizationMode::Optimistic);
+    /// ```
+    pub fn with_canonicalization(mut self, mode: CanonicalizationMode) -> Self {
+        self.canonicalization_mode = mode;
         self
     }
 
@@ -205,6 +235,7 @@ impl ServerBuilder {
             metadata,
             network_type,
             network_client: Arc::new(Mutex::new(network_client)),
+            canonicalization_mode: self.canonicalization_mode,
         };
 
         Ok(ServerHandle {
@@ -271,6 +302,24 @@ impl ServerHandle {
         }
 
         let mut tasks = Vec::new();
+
+        // Start background jobs based on canonicalization mode
+        match &self.app_state.canonicalization_mode {
+            CanonicalizationMode::Enabled(config) => {
+                println!(
+                    "Starting canonicalization worker (delay: {}s, check interval: {}s)...",
+                    config.delay_seconds, config.check_interval_seconds
+                );
+                crate::jobs::canonicalize_deltas::start_canonicalization_worker(
+                    self.app_state.clone(),
+                );
+            }
+            CanonicalizationMode::Optimistic => {
+                println!(
+                    "Running in optimistic mode - deltas accepted without on-chain verification"
+                );
+            }
+        }
 
         // Start HTTP server if enabled
         if self.http_enabled {

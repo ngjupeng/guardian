@@ -38,14 +38,20 @@ pub async fn get_delta_since(
         .get(&account_metadata.storage_type)
         .map_err(ServiceError::new)?;
 
-    let deltas = storage_backend
+    let all_deltas = storage_backend
         .pull_deltas_after(&params.account_id, params.from_nonce)
         .await
         .map_err(|e| ServiceError::new(format!("Failed to fetch deltas: {e}")))?;
 
+    // Filter out discarded deltas
+    let deltas: Vec<DeltaObject> = all_deltas
+        .into_iter()
+        .filter(|delta| delta.discarded_at.is_none())
+        .collect();
+
     if deltas.is_empty() {
         return Err(ServiceError::new(format!(
-            "No deltas found after nonce {}",
+            "No valid deltas found after nonce {}",
             params.from_nonce
         )));
     }

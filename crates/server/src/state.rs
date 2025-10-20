@@ -1,3 +1,4 @@
+use crate::canonicalization::CanonicalizationMode;
 use crate::network::{NetworkType, miden::MidenNetworkClient};
 use crate::storage::{MetadataStore, StorageRegistry};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ pub struct AppState {
     pub metadata: Arc<dyn MetadataStore>,
     pub network_type: NetworkType,
     pub network_client: Arc<Mutex<MidenNetworkClient>>,
+    pub canonicalization_mode: CanonicalizationMode,
 }
 
 impl AppState {

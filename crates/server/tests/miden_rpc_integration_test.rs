@@ -15,7 +15,7 @@ async fn test_fetch_account_commitment_from_testnet() {
         .await
         .expect("Failed to create Miden network client");
 
-    let result = client.get_account_commitment(&account_id).await;
+    let result = client.get_account_commitment(account_id.to_hex()).await;
 
     assert!(
         result.is_ok(),
