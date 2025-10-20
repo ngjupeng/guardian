@@ -84,26 +84,29 @@ pub async fn push_delta(
         )));
     }
 
-    {
+    let new_commitment = {
         let client = state.network_client.lock().await;
         client
             .verify_delta(
                 &params.delta.prev_commitment,
-                &params.delta.new_commitment,
                 &current_state.state_json,
                 &params.delta.delta_payload,
             )
             .map_err(|e| ServiceError::new(format!("Delta verification failed: {e}")))?;
-    }
+
+        let (_, commitment) = client
+            .apply_delta(&current_state.state_json, &params.delta.delta_payload)
+            .map_err(|e| ServiceError::new(format!("Failed to calculate commitment: {e}")))?;
+        commitment
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
 
     // Handle based on canonicalization mode
     match &state.canonicalization_mode {
         CanonicalizationMode::Enabled(_config) => {
-            // Submit delta as candidate
-            // The canonicalization worker will verify on-chain and apply state updates later
             let mut candidate_delta = params.delta.clone();
+            candidate_delta.new_commitment = new_commitment;
             candidate_delta.candidate_at = Some(now);
 
             storage_backend
@@ -112,20 +115,18 @@ pub async fn push_delta(
                 .map_err(|e| ServiceError::new(format!("Failed to submit delta: {e}")))?;
         }
         CanonicalizationMode::Optimistic => {
-            // Optimistically accept delta as canonical immediately
-            // Apply state update without on-chain verification
             let mut canonical_delta = params.delta.clone();
+            canonical_delta.new_commitment = new_commitment.clone();
             canonical_delta.candidate_at = Some(now.clone());
             canonical_delta.canonical_at = Some(now.clone());
 
-            let (new_state_json, new_commitment) = {
+            let (new_state_json, _) = {
                 let client = state.network_client.lock().await;
                 client
                     .apply_delta(&current_state.state_json, &canonical_delta.delta_payload)
                     .map_err(|e| ServiceError::new(format!("Failed to apply delta: {e}")))?
             };
 
-            // Update account state
             let new_state = AccountState {
                 account_id: canonical_delta.account_id.clone(),
                 commitment: new_commitment,
@@ -139,7 +140,6 @@ pub async fn push_delta(
                 .await
                 .map_err(|e| ServiceError::new(format!("Failed to update state: {e}")))?;
 
-            // Store delta as canonical
             storage_backend
                 .submit_delta(&canonical_delta)
                 .await

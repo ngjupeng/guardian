@@ -18,7 +18,6 @@ pub trait NetworkClient: Send + Sync {
     fn verify_delta(
         &self,
         prev_proof: &str,
-        new_proof: &str,
         prev_state_json: &serde_json::Value,
         delta_payload: &serde_json::Value,
     ) -> Result<(), String>;

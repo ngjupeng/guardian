@@ -53,8 +53,7 @@ message PushDeltaRequest {
   string account_id = 1;
   uint64 nonce = 2;
   string prev_commitment = 3;
-  string new_commitment = 4;
-  string delta_payload = 5; // JSON string
+  string delta_payload = 4; // JSON string
 }
 
 message PushDeltaResponse {
@@ -114,8 +113,8 @@ message DeltaObject {
   string account_id = 1;
   uint64 nonce = 2;
   string prev_commitment = 3;
-  string new_commitment = 4;
-  string delta_payload = 5; // JSON string
+  string delta_payload = 4; // JSON string
+  string new_commitment = 5;  // Calculated from applying delta
   string ack_sig = 6;
   string candidate_at = 7;
   optional string canonical_at = 8;

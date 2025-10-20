@@ -33,7 +33,6 @@ async fn test_grpc_configure_and_push_delta_with_auth() {
         account_id: delta_1["account_id"].as_str().unwrap().to_string(),
         nonce: delta_1["nonce"].as_u64().unwrap(),
         prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_1["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_1["delta_payload"]).unwrap(),
     };
 
@@ -81,7 +80,6 @@ async fn test_grpc_push_delta_unauthorized_cosigner() {
         account_id: delta_1["account_id"].as_str().unwrap().to_string(),
         nonce: delta_1["nonce"].as_u64().unwrap(),
         prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_1["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_1["delta_payload"]).unwrap(),
     };
 
@@ -127,7 +125,6 @@ async fn test_grpc_push_delta_missing_auth_metadata() {
         account_id: delta_1["account_id"].as_str().unwrap().to_string(),
         nonce: delta_1["nonce"].as_u64().unwrap(),
         prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_1["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_1["delta_payload"]).unwrap(),
     };
 
@@ -176,7 +173,6 @@ async fn test_grpc_get_delta_with_auth() {
         account_id: delta_1["account_id"].as_str().unwrap().to_string(),
         nonce: delta_1["nonce"].as_u64().unwrap(),
         prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_1["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_1["delta_payload"]).unwrap(),
     };
 
@@ -237,7 +233,6 @@ async fn test_grpc_get_delta_since_with_auth() {
         account_id: delta_1["account_id"].as_str().unwrap().to_string(),
         nonce: delta_1["nonce"].as_u64().unwrap(),
         prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_1["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_1["delta_payload"]).unwrap(),
     };
 
@@ -256,7 +251,6 @@ async fn test_grpc_get_delta_since_with_auth() {
         account_id: delta_2["account_id"].as_str().unwrap().to_string(),
         nonce: delta_2["nonce"].as_u64().unwrap(),
         prev_commitment: delta_2["prev_commitment"].as_str().unwrap().to_string(),
-        new_commitment: delta_2["new_commitment"].as_str().unwrap().to_string(),
         delta_payload: serde_json::to_string(&delta_2["delta_payload"]).unwrap(),
     };
 

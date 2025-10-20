@@ -80,12 +80,11 @@ impl StateManager for StateManagerService {
         let delta_payload: serde_json::Value = serde_json::from_str(&req.delta_payload)
             .map_err(|e| Status::invalid_argument(format!("Invalid delta_payload JSON: {e}")))?;
 
-        // Convert proto request to internal DeltaObject
         let delta = DeltaObject {
             account_id: req.account_id,
             nonce: req.nonce,
             prev_commitment: req.prev_commitment,
-            new_commitment: req.new_commitment,
+            new_commitment: String::new(),  // Will be calculated in service layer
             delta_payload,
             ack_sig: None,
             candidate_at: None,

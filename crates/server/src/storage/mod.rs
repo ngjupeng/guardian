@@ -58,6 +58,7 @@ pub struct DeltaObject {
     pub account_id: String,
     pub nonce: u64,
     pub prev_commitment: String,
+    #[serde(default)]
     pub new_commitment: String,
     pub delta_payload: serde_json::Value,
     pub ack_sig: Option<String>,
