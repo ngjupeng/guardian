@@ -57,6 +57,72 @@ async fn process_pending_canonicalizations(
     Ok(())
 }
 
+/// Process all pending canonicalizations immediately (test helper)
+/// This bypasses the time delay check and processes all pending candidates
+pub async fn process_canonicalizations_now(state: &AppState) -> Result<(), String> {
+    let account_ids = state
+        .metadata
+        .list()
+        .await
+        .map_err(|e| format!("Failed to list accounts: {e}"))?;
+
+    for account_id in account_ids {
+        if let Err(e) = process_account_canonicalizations_now(state, &account_id).await {
+            eprintln!("Failed to process canonicalizations for account {account_id}: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Process canonicalizations for a single account (test helper - bypasses time delay)
+async fn process_account_canonicalizations_now(
+    state: &AppState,
+    account_id: &str,
+) -> Result<(), String> {
+    let account_metadata = state
+        .metadata
+        .get(account_id)
+        .await
+        .map_err(|e| format!("Failed to get metadata: {e}"))?
+        .ok_or_else(|| "Account metadata not found".to_string())?;
+
+    let storage_backend = state
+        .storage
+        .get(&account_metadata.storage_type)
+        .map_err(|e| format!("Failed to get storage backend: {e}"))?;
+
+    let all_deltas = storage_backend
+        .pull_deltas_after(account_id, 0)
+        .await
+        .map_err(|e| format!("Failed to pull deltas: {e}"))?;
+
+    // Get all pending candidates (bypass time check for tests)
+    let ready_candidates: Vec<DeltaObject> = all_deltas
+        .iter()
+        .filter(|delta| {
+            delta.candidate_at.is_some()
+                && delta.canonical_at.is_none()
+                && delta.discarded_at.is_none()
+        })
+        .cloned()
+        .collect();
+
+    let mut sorted_candidates = ready_candidates;
+    sorted_candidates.sort_by_key(|d| d.nonce);
+
+    for delta in sorted_candidates {
+        if let Err(e) = verify_and_canonicalize_delta(state, &storage_backend, &delta).await {
+            eprintln!(
+                "Failed to canonicalize delta {} for account {}: {}",
+                delta.nonce, account_id, e
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Process canonicalizations for a single account
 async fn process_account_canonicalizations(
     state: &AppState,
@@ -123,7 +189,7 @@ async fn process_account_canonicalizations(
     Ok(())
 }
 
-/// Verify on-chain commitment and canonicalize delta.
+/// Verify on-chain commitment and canonicalize delta
 ///
 /// This function will:
 /// 1. Fetch the on-chain commitment from the Miden network
