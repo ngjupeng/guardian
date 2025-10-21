@@ -117,70 +117,6 @@ async fn test_canonicalization_discards_mismatched_delta() {
     );
 }
 
-/// Test failed canonicalization (discard) lifecycle
-#[tokio::test]
-async fn test_failed_canonicalization_discards_delta() {
-    let state = create_test_app_state().await;
-
-    let (_account_id, account_id_hex, initial_state) = load_fixture_account();
-    let (_, pubkey_hex, signature_hex) = generate_falcon_signature(&account_id_hex);
-
-    // Step 1: Configure account
-    let configure_params = ConfigureAccountParams {
-        account_id: account_id_hex.clone(),
-        auth: Auth::MidenFalconRpo {
-            cosigner_pubkeys: vec![pubkey_hex.clone()],
-        },
-        initial_state: initial_state.clone(),
-        storage_type: StorageType::Filesystem,
-    };
-
-    configure_account(&state, configure_params)
-        .await
-        .expect("Configure should succeed");
-
-    // Get initial state commitment to verify it doesn't change
-    let storage_backend = state
-        .storage
-        .get(&StorageType::Filesystem)
-        .expect("Should get storage backend");
-
-    let initial_account_state = storage_backend
-        .pull_state(&account_id_hex)
-        .await
-        .expect("Should pull initial state");
-
-    let initial_commitment = initial_account_state.commitment.clone();
-
-    // Step 2: Push delta with WRONG new_commitment (will fail on-chain check)
-    let delta_1 = load_fixture_delta(1);
-    let push_params = PushDeltaParams {
-        delta: DeltaObject {
-            account_id: delta_1["account_id"].as_str().unwrap().to_string(),
-            nonce: delta_1["nonce"].as_u64().unwrap(),
-            prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
-            new_commitment: String::new(), // Will be calculated by service
-            delta_payload: delta_1["delta_payload"].clone(),
-            ack_sig: None,
-            status: DeltaStatus::default(),
-        },
-        credentials: Credentials::Signature {
-            pubkey: pubkey_hex.clone(),
-            signature: signature_hex.clone(),
-        },
-    };
-
-    let push_result = push_delta(&state, push_params).await;
-    assert!(
-        push_result.is_ok(),
-        "Push should succeed (commitment is calculated correctly)"
-    );
-
-    // The delta is now a candidate. When canonicalization runs, it will be discarded
-    // because the on-chain commitment won't match (since we haven't actually updated on-chain)
-    // This tests that deltas get discarded when on-chain state doesn't match
-}
-
 /// Test that already canonical/discarded deltas are not reprocessed
 #[tokio::test]
 async fn test_only_pending_candidates_are_processed() {
@@ -259,4 +195,101 @@ async fn test_only_pending_candidates_are_processed() {
         first_discarded_timestamp,
         "Discarded delta should not be reprocessed (timestamp unchanged)"
     );
+}
+
+/// Test that cosigner public keys are synced from storage to metadata after canonicalization
+#[tokio::test]
+async fn test_canonicalization_syncs_cosigner_pubkeys() {
+    let state = create_test_app_state().await;
+
+    let (_account_id, account_id_hex, initial_state) = load_fixture_account();
+    let (_, pubkey_hex, signature_hex) = generate_falcon_signature(&account_id_hex);
+
+    // Configure account with initial pubkey
+    let configure_params = ConfigureAccountParams {
+        account_id: account_id_hex.clone(),
+        auth: Auth::MidenFalconRpo {
+            cosigner_pubkeys: vec![pubkey_hex.clone()],
+        },
+        initial_state,
+        storage_type: StorageType::Filesystem,
+    };
+
+    configure_account(&state, configure_params)
+        .await
+        .expect("Configure should succeed");
+
+    // Get initial metadata
+    let initial_metadata = state
+        .metadata
+        .get(&account_id_hex)
+        .await
+        .expect("Should get metadata")
+        .expect("Metadata should exist");
+
+    let initial_pubkeys = match &initial_metadata.auth {
+        Auth::MidenFalconRpo { cosigner_pubkeys } => cosigner_pubkeys.clone(),
+    };
+
+    // Push delta 1 (adds 4th approver)
+    let delta_1 = load_fixture_delta(1);
+    let push_params = PushDeltaParams {
+        delta: DeltaObject {
+            account_id: delta_1["account_id"].as_str().unwrap().to_string(),
+            nonce: delta_1["nonce"].as_u64().unwrap(),
+            prev_commitment: delta_1["prev_commitment"].as_str().unwrap().to_string(),
+            new_commitment: String::new(),
+            delta_payload: delta_1["delta_payload"].clone(),
+            ack_sig: None,
+            status: DeltaStatus::default(),
+        },
+        credentials: Credentials::Signature {
+            pubkey: pubkey_hex.clone(),
+            signature: signature_hex.clone(),
+        },
+    };
+
+    push_delta(&state, push_params)
+        .await
+        .expect("Push should succeed");
+
+    // Update mock network client to return the new commitment as "on-chain" state
+    // This simulates the delta being canonicalized on-chain
+    update_mock_on_chain_commitment(
+        &state,
+        account_id_hex.clone(),
+        delta_1["new_commitment"].as_str().unwrap().to_string(),
+    )
+    .await;
+
+    // Run canonicalization - should canonicalize the delta and sync pubkeys
+    let _ = process_canonicalizations_now(&state).await;
+
+    // Verify metadata was updated with new public keys from storage
+    let updated_metadata = state
+        .metadata
+        .get(&account_id_hex)
+        .await
+        .expect("Should get metadata")
+        .expect("Metadata should exist");
+
+    let updated_pubkeys = match &updated_metadata.auth {
+        Auth::MidenFalconRpo { cosigner_pubkeys } => cosigner_pubkeys.clone(),
+    };
+
+    assert_ne!(
+        initial_pubkeys.len(),
+        updated_pubkeys.len(),
+        "Metadata should have been updated with new pubkeys"
+    );
+
+    assert_eq!(
+        updated_pubkeys.len(),
+        4,
+        "Should have 4 public keys after delta 1 (added 4th approver)"
+    );
+
+    println!("✓ Cosigner public keys synced from storage to metadata");
+    println!("  Initial: {} keys", initial_pubkeys.len());
+    println!("  Updated: {} keys", updated_pubkeys.len());
 }

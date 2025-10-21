@@ -40,8 +40,14 @@ pub mod test_helpers {
             }
         }
 
+        #[allow(dead_code)]
         pub fn register_account(&mut self, account_id: String, commitment: String) {
             self.initial_commitments.insert(account_id, commitment);
+        }
+
+        #[allow(dead_code)]
+        pub fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
         }
     }
 
@@ -329,5 +335,22 @@ pub mod test_helpers {
         let signature_hex = format!("0x{}", hex::encode(signature.to_bytes()));
 
         (account_id_hex.to_string(), pubkey_hex, signature_hex)
+    }
+
+    /// Update the mock network client's on-chain commitment for an account
+    #[allow(dead_code)]
+    pub async fn update_mock_on_chain_commitment(
+        state: &AppState,
+        account_id: String,
+        commitment: String,
+    ) {
+        let mut network_client = state.network_client.lock().await;
+
+        // We need to downcast to MockNetworkClient to access register_account
+        // Since we can't downcast trait objects directly, we use unsafe pointer casting
+        let ptr = &mut *network_client as *mut dyn NetworkClient as *mut MockNetworkClient;
+        unsafe {
+            (*ptr).register_account(account_id, commitment);
+        }
     }
 }

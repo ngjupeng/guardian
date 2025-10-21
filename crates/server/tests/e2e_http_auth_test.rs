@@ -9,7 +9,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use serde_json::json;
-use tower::{Service, ServiceExt}; // For making service calls
+use tower::{Service, ServiceExt};
 
 #[tokio::test]
 async fn test_configure_and_push_delta_with_auth() {
