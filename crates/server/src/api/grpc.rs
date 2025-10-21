@@ -62,7 +62,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(ConfigureResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
             })),
         }
     }
@@ -106,7 +106,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(PushDeltaResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
                 delta: None,
             })),
         }
@@ -136,7 +136,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(GetDeltaResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
                 delta: None,
             })),
         }
@@ -166,7 +166,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(GetDeltaSinceResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
                 merged_delta: None,
             })),
         }
@@ -195,7 +195,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(GetDeltaHeadResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
                 latest_nonce: None,
             })),
         }
@@ -224,7 +224,7 @@ impl StateManager for StateManagerService {
             })),
             Err(e) => Ok(Response::new(GetStateResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
                 state: None,
             })),
         }

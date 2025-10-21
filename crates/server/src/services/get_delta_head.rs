@@ -1,8 +1,7 @@
 use crate::auth::Credentials;
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
-
-use super::{ServiceError, ServiceResult};
 
 #[derive(Debug, Clone)]
 pub struct GetDeltaHeadParams {
@@ -15,46 +14,39 @@ pub struct GetDeltaHeadResult {
     pub delta: DeltaObject,
 }
 
-/// Get the latest delta (head) for an account
 pub async fn get_delta_head(
     state: &AppState,
     params: GetDeltaHeadParams,
-) -> ServiceResult<GetDeltaHeadResult> {
-    // Verify account exists
+) -> Result<GetDeltaHeadResult> {
     let account_metadata = state
         .metadata
         .get(&params.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", params.account_id)))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
+        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
 
     account_metadata
         .auth
         .verify(&params.account_id, &params.credentials)
-        .map_err(|e| ServiceError::new(format!("Authentication failed: {e}")))?;
+        .map_err(PsmError::AuthenticationFailed)?;
 
-    // Get the storage backend for this account
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(ServiceError::new)?;
+        .map_err(PsmError::ConfigurationError)?;
 
-    // Fetch all deltas and find the latest non-discarded one
     let all_deltas = storage_backend
         .pull_deltas_after(&params.account_id, 0)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to fetch deltas: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to fetch deltas: {e}")))?;
 
-    // Filter out discarded deltas and get the latest
     let delta = all_deltas
         .into_iter()
         .filter(|d| d.discarded_at.is_none())
         .max_by_key(|d| d.nonce)
-        .ok_or_else(|| {
-            ServiceError::new(format!(
-                "No valid deltas found for account '{}'",
-                params.account_id
-            ))
+        .ok_or_else(|| PsmError::DeltaNotFound {
+            account_id: params.account_id.clone(),
+            nonce: 0,
         })?;
 
     Ok(GetDeltaHeadResult { delta })

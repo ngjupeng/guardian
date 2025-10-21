@@ -1,8 +1,7 @@
 use crate::auth::Credentials;
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
-
-use super::{ServiceError, ServiceResult};
 
 #[derive(Debug, Clone)]
 pub struct GetDeltaSinceParams {
@@ -19,40 +18,39 @@ pub struct GetDeltaSinceResult {
 pub async fn get_delta_since(
     state: &AppState,
     params: GetDeltaSinceParams,
-) -> ServiceResult<GetDeltaSinceResult> {
+) -> Result<GetDeltaSinceResult> {
     let account_metadata = state
         .metadata
         .get(&params.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", params.account_id)))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
+        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
 
     account_metadata
         .auth
         .verify(&params.account_id, &params.credentials)
-        .map_err(|e| ServiceError::new(format!("Authentication failed: {e}")))?;
+        .map_err(PsmError::AuthenticationFailed)?;
 
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(ServiceError::new)?;
+        .map_err(PsmError::ConfigurationError)?;
 
     let all_deltas = storage_backend
         .pull_deltas_after(&params.account_id, params.from_nonce)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to fetch deltas: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to fetch deltas: {e}")))?;
 
-    // Filter out discarded deltas
     let deltas: Vec<DeltaObject> = all_deltas
         .into_iter()
         .filter(|delta| delta.discarded_at.is_none())
         .collect();
 
     if deltas.is_empty() {
-        return Err(ServiceError::new(format!(
-            "No valid deltas found after nonce {}",
-            params.from_nonce
-        )));
+        return Err(PsmError::DeltaNotFound {
+            account_id: params.account_id.clone(),
+            nonce: params.from_nonce,
+        });
     }
 
     let delta_payloads: Vec<serde_json::Value> =
@@ -62,7 +60,7 @@ pub async fn get_delta_since(
         let client = state.network_client.lock().await;
         client
             .merge_deltas(delta_payloads)
-            .map_err(|e| ServiceError::new(format!("Failed to merge deltas: {e}")))?
+            .map_err(PsmError::InvalidDelta)?
     };
 
     let last_delta = deltas.last().unwrap();

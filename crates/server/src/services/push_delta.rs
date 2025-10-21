@@ -1,10 +1,9 @@
 use crate::auth::Credentials;
 use crate::canonicalization::CanonicalizationMode;
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject, StorageBackend};
 use std::sync::Arc;
-
-use super::{ServiceError, ServiceResult};
 
 #[derive(Debug, Clone)]
 pub struct PushDeltaParams {
@@ -20,32 +19,30 @@ pub struct PushDeltaResult {
 pub async fn push_delta(
     state: &AppState,
     params: PushDeltaParams,
-) -> ServiceResult<PushDeltaResult> {
+) -> Result<PushDeltaResult> {
     let account_metadata = state
         .metadata
         .get(&params.delta.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| {
-            ServiceError::new(format!("Account '{}' not found", params.delta.account_id))
-        })?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
+        .ok_or_else(|| PsmError::AccountNotFound(params.delta.account_id.clone()))?;
 
     account_metadata
         .auth
         .verify(&params.delta.account_id, &params.credentials)
-        .map_err(|e| ServiceError::new(format!("Authentication failed: {e}")))?;
+        .map_err(PsmError::AuthenticationFailed)?;
 
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(ServiceError::new)?;
+        .map_err(PsmError::ConfigurationError)?;
 
     check_no_pending_candidates(&storage_backend, &params.delta.account_id).await?;
 
     let current_state = storage_backend
         .pull_state(&params.delta.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to fetch account state: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to fetch account state: {e}")))?;
 
     verify_prev_commitment(&params.delta, &current_state)?;
 
@@ -79,11 +76,11 @@ pub async fn push_delta(
 async fn check_no_pending_candidates(
     storage_backend: &Arc<dyn StorageBackend>,
     account_id: &str,
-) -> ServiceResult<()> {
+) -> Result<()> {
     let all_deltas = storage_backend
         .pull_deltas_after(account_id, 0)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check deltas: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check deltas: {e}")))?;
 
     eprintln!("DEBUG: Checking {} existing deltas", all_deltas.len());
     for delta in &all_deltas {
@@ -100,20 +97,18 @@ async fn check_no_pending_candidates(
     eprintln!("DEBUG: has_pending_candidate = {has_pending_candidate}");
 
     if has_pending_candidate {
-        return Err(ServiceError::new(
-            "Cannot push new delta: there is already a non-canonical delta pending. Wait for canonicalization or discard the pending delta.".to_string()
-        ));
+        return Err(PsmError::ConflictPendingDelta);
     }
 
     Ok(())
 }
 
-fn verify_prev_commitment(delta: &DeltaObject, current_state: &AccountState) -> ServiceResult<()> {
+fn verify_prev_commitment(delta: &DeltaObject, current_state: &AccountState) -> Result<()> {
     if delta.prev_commitment != current_state.commitment {
-        return Err(ServiceError::new(format!(
-            "Delta prev_commitment mismatch: expected {}, got {}",
-            current_state.commitment, delta.prev_commitment
-        )));
+        return Err(PsmError::CommitmentMismatch {
+            expected: current_state.commitment.clone(),
+            actual: delta.prev_commitment.clone(),
+        });
     }
     Ok(())
 }
@@ -122,7 +117,7 @@ async fn calculate_new_commitment(
     state: &AppState,
     current_state: &AccountState,
     delta_payload: &serde_json::Value,
-) -> ServiceResult<String> {
+) -> Result<String> {
     let client = state.network_client.lock().await;
 
     client
@@ -131,11 +126,11 @@ async fn calculate_new_commitment(
             &current_state.state_json,
             delta_payload,
         )
-        .map_err(|e| ServiceError::new(format!("Delta verification failed: {e}")))?;
+        .map_err(PsmError::InvalidDelta)?;
 
     let (_, commitment) = client
         .apply_delta(&current_state.state_json, delta_payload)
-        .map_err(|e| ServiceError::new(format!("Failed to calculate commitment: {e}")))?;
+        .map_err(PsmError::InvalidDelta)?;
 
     Ok(commitment)
 }
@@ -145,7 +140,7 @@ async fn save_as_candidate(
     delta: &DeltaObject,
     new_commitment: &str,
     timestamp: &str,
-) -> ServiceResult<()> {
+) -> Result<()> {
     let mut candidate_delta = delta.clone();
     candidate_delta.new_commitment = new_commitment.to_string();
     candidate_delta.candidate_at = Some(timestamp.to_string());
@@ -153,7 +148,7 @@ async fn save_as_candidate(
     storage_backend
         .submit_delta(&candidate_delta)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to submit delta: {e}")))
+        .map_err(|e| PsmError::StorageError(format!("Failed to submit delta: {e}")))
 }
 
 async fn save_as_canonical(
@@ -163,7 +158,7 @@ async fn save_as_canonical(
     current_state: &AccountState,
     new_commitment: &str,
     timestamp: &str,
-) -> ServiceResult<()> {
+) -> Result<()> {
     let mut canonical_delta = delta.clone();
     canonical_delta.new_commitment = new_commitment.to_string();
     canonical_delta.candidate_at = Some(timestamp.to_string());
@@ -173,7 +168,7 @@ async fn save_as_canonical(
         let client = state.network_client.lock().await;
         client
             .apply_delta(&current_state.state_json, &canonical_delta.delta_payload)
-            .map_err(|e| ServiceError::new(format!("Failed to apply delta: {e}")))?
+            .map_err(PsmError::InvalidDelta)?
     };
 
     let new_state = AccountState {
@@ -187,12 +182,12 @@ async fn save_as_canonical(
     storage_backend
         .submit_state(&new_state)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to update state: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to update state: {e}")))?;
 
     storage_backend
         .submit_delta(&canonical_delta)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to submit delta: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to submit delta: {e}")))?;
 
     Ok(())
 }

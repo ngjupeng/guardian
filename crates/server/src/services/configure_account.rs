@@ -1,8 +1,7 @@
 use crate::auth::Auth;
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::{AccountMetadata, AccountState, StorageType};
-
-use super::{ServiceError, ServiceResult};
 
 #[derive(Debug, Clone)]
 pub struct ConfigureAccountParams {
@@ -21,19 +20,15 @@ pub struct ConfigureAccountResult {
 pub async fn configure_account(
     state: &AppState,
     params: ConfigureAccountParams,
-) -> ServiceResult<ConfigureAccountResult> {
-    // Check if account already exists in metadata
+) -> Result<ConfigureAccountResult> {
     let existing = state
         .metadata
         .get(&params.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check existing account: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check existing account: {e}")))?;
 
     if existing.is_some() {
-        return Err(ServiceError::new(format!(
-            "Account '{}' already exists",
-            params.account_id
-        )));
+        return Err(PsmError::AccountAlreadyExists(params.account_id.clone()));
     }
 
     let commitment = {
@@ -41,7 +36,7 @@ pub async fn configure_account(
         client
             .verify_state(&params.account_id, &params.initial_state)
             .await
-            .map_err(ServiceError::new)?
+            .map_err(PsmError::NetworkError)?
     };
 
     // Create initial account state
@@ -54,17 +49,15 @@ pub async fn configure_account(
         updated_at: now,
     };
 
-    // Get the storage backend for this account's storage type
     let storage_backend = state
         .storage
         .get(&params.storage_type)
-        .map_err(ServiceError::new)?;
+        .map_err(PsmError::ConfigurationError)?;
 
-    // Submit initial state to storage
     storage_backend
         .submit_state(&account_state)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to submit initial state: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to submit initial state: {e}")))?;
 
     // Create and store metadata
     let metadata_entry = AccountMetadata {
@@ -79,7 +72,7 @@ pub async fn configure_account(
         .metadata
         .set(metadata_entry)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to store metadata: {e}")))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to store metadata: {e}")))?;
 
     Ok(ConfigureAccountResult {
         account_id: params.account_id,

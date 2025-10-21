@@ -1,8 +1,7 @@
 use crate::auth::Credentials;
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::AccountState;
-
-use super::{ServiceError, ServiceResult};
 
 #[derive(Debug, Clone)]
 pub struct GetStateParams {
@@ -15,31 +14,28 @@ pub struct GetStateResult {
     pub state: AccountState,
 }
 
-/// Get account state
-pub async fn get_state(state: &AppState, params: GetStateParams) -> ServiceResult<GetStateResult> {
-    // Verify account exists
+pub async fn get_state(state: &AppState, params: GetStateParams) -> Result<GetStateResult> {
     let account_metadata = state
         .metadata
         .get(&params.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| ServiceError::new(format!("Account '{}' not found", &params.account_id)))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
+        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
 
     account_metadata
         .auth
         .verify(&params.account_id, &params.credentials)
-        .map_err(|e| ServiceError::new(format!("Authentication failed: {e}")))?;
+        .map_err(PsmError::AuthenticationFailed)?;
 
-    // Get the storage backend for this account
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(ServiceError::new)?;
+        .map_err(PsmError::ConfigurationError)?;
 
     let account_state = storage_backend
         .pull_state(&params.account_id)
         .await
-        .map_err(|e| ServiceError::new(format!("Failed to fetch state: {e}")))?;
+        .map_err(|_e| PsmError::StateNotFound(params.account_id.clone()))?;
 
     Ok(GetStateResult {
         state: account_state,

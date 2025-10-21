@@ -83,7 +83,7 @@ pub async fn configure(
             StatusCode::BAD_REQUEST,
             Json(ConfigureResponse {
                 success: false,
-                message: e.message,
+                message: e.to_string(),
             }),
         ),
     }
@@ -118,7 +118,7 @@ pub async fn push_delta(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(DeltaObject {
-                account_id: e.message,
+                account_id: e.to_string(),
                 ..Default::default()
             }),
         ),
@@ -155,7 +155,7 @@ pub async fn get_delta(
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(DeltaObject {
-                account_id: e.message,
+                account_id: e.to_string(),
                 ..Default::default()
             }),
         ),
@@ -192,7 +192,7 @@ pub async fn get_delta_since(
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(DeltaObject {
-                account_id: e.message,
+                account_id: e.to_string(),
                 ..Default::default()
             }),
         ),
@@ -238,7 +238,7 @@ pub async fn get_delta_head(
             Json(DeltaHeadResponse {
                 success: false,
                 latest_nonce: None,
-                message: Some(e.message),
+                message: Some(e.to_string()),
             }),
         ),
     }
@@ -273,7 +273,7 @@ pub async fn get_state(
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(AccountState {
-                account_id: e.message,
+                account_id: e.to_string(),
                 ..Default::default()
             }),
         ),

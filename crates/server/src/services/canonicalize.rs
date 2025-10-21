@@ -1,4 +1,5 @@
 use crate::canonicalization::{CanonicalizationConfig, CanonicalizationMode};
+use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject, StorageBackend};
 use std::sync::Arc;
@@ -35,12 +36,12 @@ async fn canonicalization_worker(state: AppState) {
 async fn process_pending_canonicalizations(
     state: &AppState,
     config: &CanonicalizationConfig,
-) -> Result<(), String> {
+) -> Result<()> {
     let account_ids = state
         .metadata
         .list()
         .await
-        .map_err(|e| format!("Failed to list accounts: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to list accounts: {e}")))?;
 
     for account_id in account_ids {
         if let Err(e) = process_account_canonicalizations(state, &account_id, config).await {
@@ -51,12 +52,12 @@ async fn process_pending_canonicalizations(
     Ok(())
 }
 
-pub async fn process_canonicalizations_now(state: &AppState) -> Result<(), String> {
+pub async fn process_canonicalizations_now(state: &AppState) -> Result<()> {
     let account_ids = state
         .metadata
         .list()
         .await
-        .map_err(|e| format!("Failed to list accounts: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to list accounts: {e}")))?;
 
     for account_id in account_ids {
         if let Err(e) = process_account_canonicalizations_now(state, &account_id).await {
@@ -70,23 +71,23 @@ pub async fn process_canonicalizations_now(state: &AppState) -> Result<(), Strin
 async fn process_account_canonicalizations_now(
     state: &AppState,
     account_id: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     let account_metadata = state
         .metadata
         .get(account_id)
         .await
-        .map_err(|e| format!("Failed to get metadata: {e}"))?
-        .ok_or_else(|| "Account metadata not found".to_string())?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to get metadata: {e}")))?
+        .ok_or_else(|| PsmError::InvalidInput("Account metadata not found".to_string()))?;
 
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(|e| format!("Failed to get storage backend: {e}"))?;
+        .map_err(PsmError::ConfigurationError)?;
 
     let all_deltas = storage_backend
         .pull_deltas_after(account_id, 0)
         .await
-        .map_err(|e| format!("Failed to pull deltas: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to pull deltas: {e}")))?;
 
     let ready_candidates = filter_pending_candidates(&all_deltas);
     process_candidates(state, &storage_backend, ready_candidates, account_id).await?;
@@ -98,23 +99,23 @@ async fn process_account_canonicalizations(
     state: &AppState,
     account_id: &str,
     config: &CanonicalizationConfig,
-) -> Result<(), String> {
+) -> Result<()> {
     let account_metadata = state
         .metadata
         .get(account_id)
         .await
-        .map_err(|e| format!("Failed to get metadata: {e}"))?
-        .ok_or_else(|| "Account metadata not found".to_string())?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to get metadata: {e}")))?
+        .ok_or_else(|| PsmError::InvalidInput("Account metadata not found".to_string()))?;
 
     let storage_backend = state
         .storage
         .get(&account_metadata.storage_type)
-        .map_err(|e| format!("Failed to get storage backend: {e}"))?;
+        .map_err(PsmError::ConfigurationError)?;
 
     let all_deltas = storage_backend
         .pull_deltas_after(account_id, 0)
         .await
-        .map_err(|e| format!("Failed to pull deltas: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to pull deltas: {e}")))?;
 
     let ready_candidates = filter_ready_candidates(&all_deltas, config);
     process_candidates(state, &storage_backend, ready_candidates, account_id).await?;
@@ -175,7 +176,7 @@ async fn process_candidates(
     storage_backend: &Arc<dyn StorageBackend>,
     candidates: Vec<DeltaObject>,
     account_id: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     for delta in candidates {
         if let Err(e) = verify_and_canonicalize_delta(state, storage_backend, &delta).await {
             eprintln!(
@@ -191,7 +192,7 @@ async fn verify_and_canonicalize_delta(
     state: &AppState,
     storage_backend: &Arc<dyn StorageBackend>,
     delta: &DeltaObject,
-) -> Result<(), String> {
+) -> Result<()> {
     let on_chain_commitment = fetch_on_chain_commitment(state, &delta.account_id).await?;
 
     if on_chain_commitment == delta.new_commitment {
@@ -207,19 +208,19 @@ async fn verify_and_canonicalize_delta(
     }
 }
 
-async fn fetch_on_chain_commitment(state: &AppState, account_id: &str) -> Result<String, String> {
+async fn fetch_on_chain_commitment(state: &AppState, account_id: &str) -> Result<String> {
     let mut client = state.network_client.lock().await;
     client
         .verify_on_chain_state(account_id)
         .await
-        .map_err(|e| format!("Failed to fetch on-chain commitment: {e}"))
+        .map_err(PsmError::NetworkError)
 }
 
 async fn canonicalize_delta(
     state: &AppState,
     storage_backend: &Arc<dyn StorageBackend>,
     delta: &DeltaObject,
-) -> Result<(), String> {
+) -> Result<()> {
     println!(
         "✓ Canonicalizing delta {} for account {} (commitment matches on-chain)",
         delta.nonce, delta.account_id
@@ -228,7 +229,7 @@ async fn canonicalize_delta(
     let current_state = storage_backend
         .pull_state(&delta.account_id)
         .await
-        .map_err(|e| format!("Failed to get current state: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to get current state: {e}")))?;
 
     let (new_state_json, new_commitment) =
         apply_delta_to_state(state, &current_state.state_json, &delta.delta_payload).await?;
@@ -255,7 +256,7 @@ async fn discard_delta(
     delta: &DeltaObject,
     expected_commitment: &str,
     actual_commitment: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     println!(
         "✗ Discarding delta {} for account {} (commitment mismatch: expected {}, got {})",
         delta.nonce, delta.account_id, expected_commitment, actual_commitment
@@ -269,22 +270,23 @@ async fn discard_delta(
     storage_backend
         .submit_delta(&discarded_delta)
         .await
-        .map_err(|e| format!("Failed to update delta as discarded: {e}"))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to update delta as discarded: {e}")))?;
 
-    Err(format!(
-        "On-chain commitment mismatch: expected {expected_commitment}, got {actual_commitment}. Delta discarded."
-    ))
+    Err(PsmError::CommitmentMismatch {
+        expected: expected_commitment.to_string(),
+        actual: actual_commitment.to_string(),
+    })
 }
 
 async fn apply_delta_to_state(
     state: &AppState,
     current_state_json: &serde_json::Value,
     delta_payload: &serde_json::Value,
-) -> Result<(serde_json::Value, String), String> {
+) -> Result<(serde_json::Value, String)> {
     let client = state.network_client.lock().await;
     client
         .apply_delta(current_state_json, delta_payload)
-        .map_err(|e| format!("Failed to apply delta during canonicalization: {e}"))
+        .map_err(PsmError::InvalidDelta)
 }
 
 async fn update_account_state(
@@ -294,7 +296,7 @@ async fn update_account_state(
     commitment: String,
     created_at: &str,
     updated_at: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     let updated_state = AccountState {
         account_id: account_id.to_string(),
         state_json,
@@ -306,19 +308,19 @@ async fn update_account_state(
     storage_backend
         .submit_state(&updated_state)
         .await
-        .map_err(|e| format!("Failed to update account state: {e}"))
+        .map_err(|e| PsmError::StorageError(format!("Failed to update account state: {e}")))
 }
 
 async fn mark_delta_canonical(
     storage_backend: &Arc<dyn StorageBackend>,
     delta: &DeltaObject,
     timestamp: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut canonical_delta = delta.clone();
     canonical_delta.canonical_at = Some(timestamp.to_string());
 
     storage_backend
         .submit_delta(&canonical_delta)
         .await
-        .map_err(|e| format!("Failed to update delta as canonical: {e}"))
+        .map_err(|e| PsmError::StorageError(format!("Failed to update delta as canonical: {e}")))
 }

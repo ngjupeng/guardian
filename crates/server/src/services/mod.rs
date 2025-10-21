@@ -6,21 +6,6 @@ mod get_delta_since;
 mod get_state;
 mod push_delta;
 
-pub type ServiceResult<T> = Result<T, ServiceError>;
-
-#[derive(Debug, Clone)]
-pub struct ServiceError {
-    pub message: String,
-}
-
-impl ServiceError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
 // Re-export configure_account
 pub use configure_account::{ConfigureAccountParams, ConfigureAccountResult, configure_account};
 
