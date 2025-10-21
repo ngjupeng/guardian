@@ -1,5 +1,6 @@
 use crate::api::grpc::state_manager::auth_config;
 use crate::error::PsmError;
+use crate::storage::MetadataStore;
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 mod miden_falcon_rpo;
@@ -146,4 +147,31 @@ where
             .map_err(PsmError::AuthenticationFailed)?;
         Ok(AuthHeader(creds))
     }
+}
+
+pub async fn update_credentials(
+    store: &dyn MetadataStore,
+    account_id: &str,
+    new_auth: Auth,
+    now: &str,
+) -> Result<(), PsmError> {
+    let mut metadata = store
+        .get(account_id)
+        .await
+        .map_err(|e| PsmError::StorageError(format!("Failed to get metadata: {e}")))?
+        .ok_or_else(|| PsmError::AccountNotFound(account_id.to_string()))?;
+
+    if metadata.auth == new_auth {
+        return Ok(());
+    }
+
+    metadata.auth = new_auth;
+    metadata.updated_at = now.to_string();
+
+    store
+        .set(metadata)
+        .await
+        .map_err(|e| PsmError::StorageError(format!("Failed to update metadata: {e}")))?;
+
+    Ok(())
 }

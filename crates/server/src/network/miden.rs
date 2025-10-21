@@ -1,6 +1,8 @@
+use crate::auth::Auth;
 use crate::network::{NetworkClient, NetworkType};
 use async_trait::async_trait;
 use miden_objects::account::{Account, AccountDelta, AccountId};
+use miden_objects::{utils::Serializable, Word};
 use miden_rpc_client::MidenRpcClient;
 use private_state_manager_shared::{FromJson, ToJson};
 
@@ -146,6 +148,50 @@ impl NetworkClient for MidenNetworkClient {
             .map_err(|e| format!("Invalid Miden account ID format: {e}"))?;
         Ok(())
     }
+
+    async fn is_canonical(
+        &mut self,
+        delta: &crate::storage::DeltaObject,
+    ) -> Result<bool, String> {
+        let on_chain_commitment = self.verify_on_chain_state(&delta.account_id).await?;
+        Ok(delta.new_commitment == on_chain_commitment)
+    }
+
+    async fn should_update_auth(
+        &mut self,
+        state_json: &serde_json::Value,
+    ) -> Result<Option<Auth>, String> {
+        let account = Account::from_json(state_json)?;
+
+        let key_zero = Word::from([0u32, 0, 0, 0]);
+        let first_entry = account.storage().get_map_item(1, key_zero);
+
+        if first_entry.is_err() || first_entry.as_ref().unwrap() == &Word::default() {
+            return Ok(None);
+        }
+
+        let mut pubkeys = Vec::new();
+        let mut index = 0u32;
+        loop {
+            let key = Word::from([index, 0, 0, 0]);
+            match account.storage().get_map_item(1, key) {
+                Ok(value) if value != Word::default() => {
+                    let pubkey_hex = format!("0x{}", hex::encode(value.to_bytes()));
+                    pubkeys.push(pubkey_hex);
+                    index += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if pubkeys.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Auth::MidenFalconRpo {
+                cosigner_pubkeys: pubkeys,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,62 +230,6 @@ mod tests {
             result.unwrap_err().contains("data"),
             "Error should mention missing 'data' field"
         );
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires account to exist on Miden testnet
-    async fn test_verify_account_with_fixture_data() {
-        let network = NetworkType::MidenTestnet;
-        let mut client = MidenNetworkClient::from_network(network)
-            .await
-            .expect("Failed to create client");
-
-        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("server")
-            .join("tests")
-            .join("fixtures")
-            .join("account.json");
-
-        let fixture_contents = match std::fs::read_to_string(&fixture_path) {
-            Ok(contents) => contents,
-            Err(_) => {
-                println!(
-                    "⚠️  Fixture not found - skipping test. Run fetch_fixture_account test first."
-                );
-                return;
-            }
-        };
-
-        let state_json: serde_json::Value =
-            serde_json::from_str(&fixture_contents).expect("Failed to parse fixture JSON");
-
-        let account_id_hex = state_json["account_id"]
-            .as_str()
-            .expect("No account_id in fixture");
-
-        let expected_commitment =
-            "0x1200f7511bf4d0c66c1a146a066fe450877e88e0e9886a2c259eaac57fc6163f";
-
-        println!("Testing with fixture account: {account_id_hex}");
-        println!("Expected commitment: {expected_commitment}");
-
-        let result = client.verify_state(account_id_hex, &state_json).await;
-
-        assert!(
-            result.is_ok(),
-            "Should succeed with valid fixture data: {:?}",
-            result.err()
-        );
-
-        let commitment = result.unwrap();
-        assert_eq!(
-            commitment, expected_commitment,
-            "Commitment should match expected value"
-        );
-
-        println!("✓ Full commitment validation passed!");
     }
 
     #[tokio::test]

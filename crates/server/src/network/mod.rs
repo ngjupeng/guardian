@@ -37,6 +37,18 @@ pub trait NetworkClient: Send + Sync {
 
     /// Validate account ID format
     fn validate_account_id(&self, account_id: &str) -> Result<(), String>;
+
+    /// Check if delta is canonical per on-chain state
+    async fn is_canonical(
+        &mut self,
+        delta: &crate::storage::DeltaObject,
+    ) -> Result<bool, String>;
+
+    /// Determine if account auth should be updated given the state
+    async fn should_update_auth(
+        &mut self,
+        state_json: &serde_json::Value,
+    ) -> Result<Option<crate::auth::Auth>, String>;
 }
 
 /// Network type

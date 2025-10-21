@@ -114,6 +114,21 @@ pub mod test_helpers {
         fn validate_account_id(&self, account_id: &str) -> Result<(), String> {
             self.miden_client.validate_account_id(account_id)
         }
+
+        async fn is_canonical(
+            &mut self,
+            delta: &server::storage::DeltaObject,
+        ) -> Result<bool, String> {
+            let on_chain_commitment = self.verify_on_chain_state(&delta.account_id).await?;
+            Ok(delta.new_commitment == on_chain_commitment)
+        }
+
+        async fn should_update_auth(
+            &mut self,
+            state_json: &serde_json::Value,
+        ) -> Result<Option<server::auth::Auth>, String> {
+            self.miden_client.should_update_auth(state_json).await
+        }
     }
 
     /// Create test app state with temporary storage and metadata
