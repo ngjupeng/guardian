@@ -2,6 +2,7 @@ use crate::auth::Credentials;
 use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::AccountState;
+use crate::services::resolve_account;
 
 #[derive(Debug, Clone)]
 pub struct GetStateParams {
@@ -15,24 +16,10 @@ pub struct GetStateResult {
 }
 
 pub async fn get_state(state: &AppState, params: GetStateParams) -> Result<GetStateResult> {
-    let account_metadata = state
-        .metadata
-        .get(&params.account_id)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
+    let resolved = resolve_account(state, &params.account_id, &params.credentials).await?;
 
-    account_metadata
-        .auth
-        .verify(&params.account_id, &params.credentials)
-        .map_err(PsmError::AuthenticationFailed)?;
-
-    let storage_backend = state
-        .storage
-        .get(&account_metadata.storage_type)
-        .map_err(PsmError::ConfigurationError)?;
-
-    let account_state = storage_backend
+    let account_state = resolved
+        .backend
         .pull_state(&params.account_id)
         .await
         .map_err(|_e| PsmError::StateNotFound(params.account_id.clone()))?;

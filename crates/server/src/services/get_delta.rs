@@ -2,6 +2,7 @@ use crate::auth::Credentials;
 use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
+use crate::services::resolve_account;
 
 #[derive(Debug, Clone)]
 pub struct GetDeltaParams {
@@ -17,24 +18,10 @@ pub struct GetDeltaResult {
 
 /// Get a specific delta
 pub async fn get_delta(state: &AppState, params: GetDeltaParams) -> Result<GetDeltaResult> {
-    let account_metadata = state
-        .metadata
-        .get(&params.account_id)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
+    let resolved = resolve_account(state, &params.account_id, &params.credentials).await?;
 
-    account_metadata
-        .auth
-        .verify(&params.account_id, &params.credentials)
-        .map_err(PsmError::AuthenticationFailed)?;
-
-    let storage_backend = state
-        .storage
-        .get(&account_metadata.storage_type)
-        .map_err(PsmError::ConfigurationError)?;
-
-    let delta = storage_backend
+    let delta = resolved
+        .backend
         .pull_delta(&params.account_id, params.nonce)
         .await
         .map_err(|_e| PsmError::DeltaNotFound {

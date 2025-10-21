@@ -1,4 +1,6 @@
 use crate::api::grpc::state_manager::auth_config;
+use axum::{extract::FromRequestParts, http::request::Parts};
+use crate::error::PsmError;
 
 mod miden_falcon_rpo;
 
@@ -125,5 +127,23 @@ impl TryFrom<crate::api::grpc::state_manager::AuthConfig> for Auth {
             }),
             None => Err("Auth type not specified".to_string()),
         }
+    }
+}
+
+/// Typed HTTP auth extractor to remove header parsing duplication
+pub struct AuthHeader(pub Credentials);
+
+impl<S> FromRequestParts<S> for AuthHeader
+where
+    S: Send + Sync,
+{
+    type Rejection = PsmError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let creds = parts
+            .headers
+            .extract_credentials()
+            .map_err(PsmError::AuthenticationFailed)?;
+        Ok(AuthHeader(creds))
     }
 }

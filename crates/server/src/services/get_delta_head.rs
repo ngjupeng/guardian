@@ -2,6 +2,7 @@ use crate::auth::Credentials;
 use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
+use crate::services::resolve_account;
 
 #[derive(Debug, Clone)]
 pub struct GetDeltaHeadParams {
@@ -18,36 +19,21 @@ pub async fn get_delta_head(
     state: &AppState,
     params: GetDeltaHeadParams,
 ) -> Result<GetDeltaHeadResult> {
-    let account_metadata = state
-        .metadata
-        .get(&params.account_id)
+    let account_id = params.account_id.clone();
+    let resolved = resolve_account(state, &account_id, &params.credentials).await?;
+
+    if let Some(nonce) = resolved
+        .backend
+        .get_delta_head(&account_id)
         .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
+        .map_err(|e| PsmError::StorageError(format!("Failed to fetch head: {e}")))? {
+        let delta = resolved
+            .backend
+            .pull_delta(&account_id, nonce)
+            .await
+            .map_err(|_e| PsmError::DeltaNotFound { account_id, nonce })?;
+        return Ok(GetDeltaHeadResult { delta });
+    }
 
-    account_metadata
-        .auth
-        .verify(&params.account_id, &params.credentials)
-        .map_err(PsmError::AuthenticationFailed)?;
-
-    let storage_backend = state
-        .storage
-        .get(&account_metadata.storage_type)
-        .map_err(PsmError::ConfigurationError)?;
-
-    let all_deltas = storage_backend
-        .pull_deltas_after(&params.account_id, 0)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to fetch deltas: {e}")))?;
-
-    let delta = all_deltas
-        .into_iter()
-        .filter(|d| !d.status.is_discarded())
-        .max_by_key(|d| d.nonce)
-        .ok_or_else(|| PsmError::DeltaNotFound {
-            account_id: params.account_id.clone(),
-            nonce: 0,
-        })?;
-
-    Ok(GetDeltaHeadResult { delta })
+    Err(PsmError::DeltaNotFound { account_id, nonce: 0 })
 }

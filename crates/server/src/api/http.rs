@@ -1,4 +1,4 @@
-use crate::auth::{Auth, ExtractCredentials};
+use crate::auth::{Auth, AuthHeader};
 use crate::services::{
     self, ConfigureAccountParams, GetDeltaHeadParams, GetDeltaParams, GetDeltaSinceParams,
     GetStateParams, PushDeltaParams,
@@ -9,7 +9,7 @@ use axum::{
     Json,
     extract::Query,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -91,26 +91,12 @@ pub async fn configure(
 
 pub async fn push_delta(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AuthHeader(credentials): AuthHeader,
     Json(payload): Json<DeltaObject>,
 ) -> (StatusCode, Json<DeltaObject>) {
-    // Extract authentication data from headers
-    let auth = match headers.extract_credentials() {
-        Ok(auth) => auth,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
-
     let params = PushDeltaParams {
         delta: payload,
-        credentials: auth,
+        credentials,
     };
 
     match services::push_delta(&state, params).await {
@@ -127,27 +113,13 @@ pub async fn push_delta(
 
 pub async fn get_delta(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AuthHeader(credentials): AuthHeader,
     Query(query): Query<DeltaQuery>,
 ) -> (StatusCode, Json<DeltaObject>) {
-    // Extract authentication data from headers
-    let auth = match headers.extract_credentials() {
-        Ok(auth) => auth,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
-
     let params = GetDeltaParams {
         account_id: query.account_id,
         nonce: query.nonce,
-        credentials: auth,
+        credentials,
     };
 
     match services::get_delta(&state, params).await {
@@ -164,27 +136,13 @@ pub async fn get_delta(
 
 pub async fn get_delta_since(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AuthHeader(credentials): AuthHeader,
     Query(query): Query<DeltaQuery>,
 ) -> (StatusCode, Json<DeltaObject>) {
-    // Extract authentication data from headers
-    let auth = match headers.extract_credentials() {
-        Ok(auth) => auth,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
-
     let params = GetDeltaSinceParams {
         account_id: query.account_id,
         from_nonce: query.nonce,
-        credentials: auth,
+        credentials,
     };
 
     match services::get_delta_since(&state, params).await {
@@ -201,27 +159,12 @@ pub async fn get_delta_since(
 
 pub async fn get_delta_head(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AuthHeader(credentials): AuthHeader,
     Query(query): Query<StateQuery>,
 ) -> (StatusCode, Json<DeltaHeadResponse>) {
-    // Extract authentication data from headers
-    let auth = match headers.extract_credentials() {
-        Ok(auth) => auth,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaHeadResponse {
-                    success: false,
-                    latest_nonce: None,
-                    message: Some(e),
-                }),
-            );
-        }
-    };
-
     let params = GetDeltaHeadParams {
         account_id: query.account_id,
-        credentials: auth,
+        credentials,
     };
 
     match services::get_delta_head(&state, params).await {
@@ -246,26 +189,12 @@ pub async fn get_delta_head(
 
 pub async fn get_state(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AuthHeader(credentials): AuthHeader,
     Query(query): Query<StateQuery>,
 ) -> (StatusCode, Json<AccountState>) {
-    // Extract authentication data from headers
-    let auth = match headers.extract_credentials() {
-        Ok(auth) => auth,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(AccountState {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
-
     let params = GetStateParams {
         account_id: query.account_id,
-        credentials: auth,
+        credentials,
     };
 
     match services::get_state(&state, params).await {

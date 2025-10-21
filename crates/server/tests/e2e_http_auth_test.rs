@@ -189,10 +189,10 @@ async fn test_push_delta_missing_auth_headers() {
 
     let push_response = app.oneshot(push_request).await.unwrap();
 
-    // Should fail with BAD_REQUEST because auth headers are missing
+    // Should fail with UNAUTHORIZED because auth headers are missing
     assert_eq!(
         push_response.status(),
-        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
         "Should require auth headers"
     );
 }

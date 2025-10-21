@@ -3,6 +3,7 @@ use crate::canonicalization::CanonicalizationMode;
 use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject, DeltaStatus, StorageBackend};
+use crate::services::resolve_account;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -20,26 +21,12 @@ pub async fn push_delta(
     state: &AppState,
     params: PushDeltaParams,
 ) -> Result<PushDeltaResult> {
-    let account_metadata = state
-        .metadata
-        .get(&params.delta.account_id)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| PsmError::AccountNotFound(params.delta.account_id.clone()))?;
+    let resolved = resolve_account(state, &params.delta.account_id, &params.credentials).await?;
 
-    account_metadata
-        .auth
-        .verify(&params.delta.account_id, &params.credentials)
-        .map_err(PsmError::AuthenticationFailed)?;
+    check_no_pending_candidates(&resolved.backend, &params.delta.account_id).await?;
 
-    let storage_backend = state
-        .storage
-        .get(&account_metadata.storage_type)
-        .map_err(PsmError::ConfigurationError)?;
-
-    check_no_pending_candidates(&storage_backend, &params.delta.account_id).await?;
-
-    let current_state = storage_backend
+    let current_state = resolved
+        .backend
         .pull_state(&params.delta.account_id)
         .await
         .map_err(|e| PsmError::StorageError(format!("Failed to fetch account state: {e}")))?;
@@ -53,12 +40,12 @@ pub async fn push_delta(
 
     match &state.canonicalization_mode {
         CanonicalizationMode::Enabled(_) => {
-            save_as_candidate(&storage_backend, &params.delta, &new_commitment, &now).await?;
+            save_as_candidate(&resolved.backend, &params.delta, &new_commitment, &now).await?;
         }
         CanonicalizationMode::Optimistic => {
             save_as_canonical(
                 state,
-                &storage_backend,
+                &resolved.backend,
                 &params.delta,
                 &current_state,
                 &new_commitment,

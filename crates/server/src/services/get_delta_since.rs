@@ -2,6 +2,7 @@ use crate::auth::Credentials;
 use crate::error::{PsmError, Result};
 use crate::state::AppState;
 use crate::storage::DeltaObject;
+use crate::services::resolve_account;
 
 #[derive(Debug, Clone)]
 pub struct GetDeltaSinceParams {
@@ -19,24 +20,10 @@ pub async fn get_delta_since(
     state: &AppState,
     params: GetDeltaSinceParams,
 ) -> Result<GetDeltaSinceResult> {
-    let account_metadata = state
-        .metadata
-        .get(&params.account_id)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check account: {e}")))?
-        .ok_or_else(|| PsmError::AccountNotFound(params.account_id.clone()))?;
+    let resolved = resolve_account(state, &params.account_id, &params.credentials).await?;
 
-    account_metadata
-        .auth
-        .verify(&params.account_id, &params.credentials)
-        .map_err(PsmError::AuthenticationFailed)?;
-
-    let storage_backend = state
-        .storage
-        .get(&account_metadata.storage_type)
-        .map_err(PsmError::ConfigurationError)?;
-
-    let all_deltas = storage_backend
+    let all_deltas = resolved
+        .backend
         .pull_deltas_after(&params.account_id, params.from_nonce)
         .await
         .map_err(|e| PsmError::StorageError(format!("Failed to fetch deltas: {e}")))?;
