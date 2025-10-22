@@ -9,8 +9,8 @@ pub enum KeyStoreError {
 impl fmt::Display for KeyStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KeyStoreError::StorageError(msg) => write!(f, "Storage error: {}", msg),
-            KeyStoreError::DecodingError(msg) => write!(f, "Decoding error: {}", msg),
+            KeyStoreError::StorageError(msg) => write!(f, "Storage error: {msg}"),
+            KeyStoreError::DecodingError(msg) => write!(f, "Decoding error: {msg}"),
         }
     }
 }

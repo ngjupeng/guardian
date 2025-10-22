@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 #[async_trait]
 pub trait Processor: Send + Sync {
     async fn process_all_accounts(&self) -> Result<()>;
+
+    #[allow(dead_code)]
     async fn process_account(&self, account_id: &str) -> Result<()>;
 }
 

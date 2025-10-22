@@ -30,8 +30,7 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
     pub fn with_rng(keys_directory: PathBuf, rng: R) -> Result<Self> {
         fs::create_dir_all(&keys_directory).map_err(|e| {
             KeyStoreError::StorageError(format!(
-                "Failed to create keys directory: {}",
-                e
+                "Failed to create keys directory: {e}"
             ))
         })?;
 
@@ -58,8 +57,7 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
             .open(&file_path)
             .map_err(|e| {
                 KeyStoreError::StorageError(format!(
-                    "Failed to open key file {}: {}",
-                    filename, e
+                    "Failed to open key file {filename}: {e}"
                 ))
             })?;
 
@@ -69,15 +67,13 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
 
         writer.write_all(hex_encoded.as_bytes()).map_err(|e| {
             KeyStoreError::StorageError(format!(
-                "Failed to write key to file {}: {}",
-                filename, e
+                "Failed to write key to file {filename}: {e}"
             ))
         })?;
 
         writer.flush().map_err(|e| {
             KeyStoreError::StorageError(format!(
-                "Failed to flush key file {}: {}",
-                filename, e
+                "Failed to flush key file {filename}: {e}"
             ))
         })?;
 
@@ -94,8 +90,7 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
             .open(&file_path)
             .map_err(|e| {
                 KeyStoreError::StorageError(format!(
-                    "Failed to open key file {}: {}",
-                    filename, e
+                    "Failed to open key file {filename}: {e}"
                 ))
             })?;
 
@@ -104,22 +99,19 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
 
         reader.read_line(&mut hex_encoded).map_err(|e| {
             KeyStoreError::StorageError(format!(
-                "Failed to read key from file {}: {}",
-                filename, e
+                "Failed to read key from file {filename}: {e}"
             ))
         })?;
 
         let key_bytes = hex::decode(hex_encoded.trim()).map_err(|e| {
             KeyStoreError::DecodingError(format!(
-                "Failed to decode hex key from file {}: {}",
-                filename, e
+                "Failed to decode hex key from file {filename}: {e}"
             ))
         })?;
 
         SecretKey::read_from_bytes(&key_bytes).map_err(|e| {
             KeyStoreError::DecodingError(format!(
-                "Failed to deserialize key from file {}: {}",
-                filename, e
+                "Failed to deserialize key from file {filename}: {e}"
             ))
         })
     }
