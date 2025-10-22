@@ -34,13 +34,13 @@ Each account has:
 ```rust
 use server::builder::ServerBuilder;
 
-
-let auth = Auth::new(AuthType::MidenFalconRpo, "cosigner_public_key");
+// Create storage registry with filesystem backend
+// NOTE: Other storage types will be supported in the future.
 let storage_registry = StorageRegistry::with_filesystem(PathBuf::from("/var/psm/storage")).await?;
 
 let builder = ServerBuilder::new()
     .network(NetworkType::MidenTestnet)
-    .storage(StorageRegistry::with_filesystem(PathBuf::from("/var/psm/storage")).await?);
+    .storage(storage_registry).await?);
 ```
 
 Also the server supports configuring the networks, storage types, metadata store, and keystore.
@@ -52,13 +52,11 @@ use server::storage::StorageRegistry;
 use server::storage::filesystem::FilesystemMetadataStore;
 use std::path::PathBuf;
 
+// Store accounts metadata using filesystem backend.
 let metadata = FilesystemMetadataStore::new(PathBuf::from("/var/psm/metadata")).await?;
-let storage_registry = StorageRegistry::with_filesystem(PathBuf::from("/var/psm/storage")).await?;
 
 let builder = ServerBuilder::new()
-    .network(NetworkType::MidenTestnet)
     .metadata(Arc::new(metadata))
-    .storage(storage_registry)
     .keystore(PathBuf::from("/var/psm/keystore"));
 ```
 
