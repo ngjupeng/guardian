@@ -19,6 +19,7 @@ See the [Server README](crates/server/README.md) for detailed API documentation 
 
 - `PSM_STORAGE_PATH` - Storage backend path (default: `/var/psm/storage`)
 - `PSM_METADATA_PATH` - Metadata store path (default: `/var/psm/metadata`)
+- `PSM_KEYSTORE_PATH` - Keystore path for cryptographic keys (default: `/var/psm/keystore`)
 - `PSM_ENV` - Environment (default: `dev`)
 - `RUST_LOG` - Logging level (default: `info`)
   - Supports: `trace`, `debug`, `info`, `warn`, `error`

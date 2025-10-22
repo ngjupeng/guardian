@@ -4,9 +4,7 @@ Server for managing private account states and deltas.
 
 ## Protocols
 
-Runs both HTTP REST and gRPC simultaneously:
-- HTTP: port 3000
-- gRPC: port 50051
+Can run either or both of gRPC and HTTP APIs:
 
 ```rust
 use server::builder::ServerBuilder;
@@ -23,6 +21,7 @@ let builder = ServerBuilder::new()
 - `PSM_ENV` - Environment (default: `dev`)
 - `PSM_STORAGE_PATH` - Storage backend path (default: `/var/psm/storage`)
 - `PSM_METADATA_PATH` - Metadata store path (default: `/var/psm/metadata`)
+- `PSM_KEYSTORE_PATH` - Keystore path for cryptographic keys (default: `/var/psm/keystore`)
 - `RUST_LOG` - Logging level (default: `info`)
 
 ### Account Configuration
@@ -44,22 +43,23 @@ let builder = ServerBuilder::new()
     .storage(StorageRegistry::with_filesystem(PathBuf::from("/var/psm/storage")).await?);
 ```
 
-Also the server supports configuring the networks, storage types, and metadata store.
+Also the server supports configuring the networks, storage types, metadata store, and keystore.
 
 ```rust
 use server::builder::ServerBuilder;
 use server::network::NetworkType;
 use server::storage::StorageRegistry;
 use server::storage::filesystem::FilesystemMetadataStore;
+use std::path::PathBuf;
 
 let metadata = FilesystemMetadataStore::new(PathBuf::from("/var/psm/metadata")).await?;
-
 let storage_registry = StorageRegistry::with_filesystem(PathBuf::from("/var/psm/storage")).await?;
 
 let builder = ServerBuilder::new()
     .network(NetworkType::MidenTestnet)
     .metadata(Arc::new(metadata))
-    .storage(storage_registry);
+    .storage(storage_registry)
+    .keystore(PathBuf::from("/var/psm/keystore"));
 ```
 
 ### Logging
@@ -121,7 +121,7 @@ Run all tests:
 cargo test
 ```
 
-Run specific e2e tests:
+Run specific integration tests:
 
 ```bash
 cargo test --package private-state-manager-server --test e2e_http_auth_test -- --test-threads=1

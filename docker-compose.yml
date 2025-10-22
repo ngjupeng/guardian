@@ -9,10 +9,16 @@ services:
       - "3000:3000"    # HTTP
       - "50051:50051"  # gRPC
     volumes:
-      - psm-app:/var/psm/app
+      - psm-storage:/var/psm/storage
+      - psm-metadata:/var/psm/metadata
+      - psm-keystore:/var/psm/keystore
     environment:
       - RUST_LOG=info
-      - PSM_APP_PATH=/var/psm/app
+      - PSM_STORAGE_PATH=/var/psm/storage
+      - PSM_METADATA_PATH=/var/psm/metadata
+      - PSM_KEYSTORE_PATH=/var/psm/keystore
 
 volumes:
-  psm-app:
+  psm-storage:
+  psm-metadata:
+  psm-keystore:
