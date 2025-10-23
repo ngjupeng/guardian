@@ -70,12 +70,6 @@ impl NetworkClient for MidenNetworkClient {
         Ok(on_chain_commitment)
     }
 
-    async fn verify_on_chain_state(&mut self, account_id: &str) -> Result<String, String> {
-        let account_id =
-            AccountId::from_hex(account_id).map_err(|e| format!("Invalid account ID: {e}"))?;
-        self.client.get_account_commitment(&account_id).await
-    }
-
     fn verify_delta(
         &self,
         prev_commitment: &str,
@@ -147,11 +141,6 @@ impl NetworkClient for MidenNetworkClient {
         AccountId::from_hex(account_id)
             .map_err(|e| format!("Invalid Miden account ID format: {e}"))?;
         Ok(())
-    }
-
-    async fn is_canonical(&mut self, delta: &crate::storage::DeltaObject) -> Result<bool, String> {
-        let on_chain_commitment = self.verify_on_chain_state(&delta.account_id).await?;
-        Ok(delta.new_commitment == on_chain_commitment)
     }
 
     async fn should_update_auth(

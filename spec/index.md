@@ -183,5 +183,105 @@ Each networks might have different ways to apply deltas to state or to verify va
 ```rust
 trait NetworkClient {
 
+  /// Verify state matches on-chain and return commitment
+  async fn verify_state(
+    &mut self,
+    account_id: &str,
+    state_json: &serde_json::Value,
+  ) -> Result<String, String>;
+
+  /// Verify delta is valid for given state
+  fn verify_delta(
+    &self,
+    prev_proof: &str,
+    prev_state_json: &serde_json::Value,
+    delta_payload: &serde_json::Value,
+  ) -> Result<(), String>;
+
+  /// Apply delta to state
+  fn apply_delta(
+    &self,
+    prev_state_json: &serde_json::Value,
+    delta_payload: &serde_json::Value,
+  ) -> Result<(serde_json::Value, String), String>;
+
+  /// Merge multiple deltas
+  fn merge_deltas(
+    &self,
+    delta_payloads: Vec<serde_json::Value>,
+  ) -> Result<serde_json::Value, String>;
+
+  /// Validate account ID format
+  fn validate_account_id(&self, account_id: &str) -> Result<(), String>;
+
+  /// Determine if account auth should be updated given the state
+  async fn should_update_auth(
+    &mut self,
+    state_json: &serde_json::Value,
+  ) -> Result<Option<Auth>, String>;
 }
 ```
+
+### Storage
+
+Storage is the component responsible for persisting account state and deltas, ensuring append-only semantics for deltas and tracking their lifecycle status (candidate, canonical, discarded). It is designed to be pluggable across multiple backends (e.g., filesystem, cloud object stores, databases) and selectable per account via `StorageType` in metadata.
+
+```rust
+trait StorageBackend {
+  // Persist the full account state and its commitment
+  async fn submit_state(&self, state: &AccountState) -> Result<(), String>;
+
+  // Persist a delta object (append-only)
+  async fn submit_delta(&self, delta: &DeltaObject) -> Result<(), String>;
+
+  // Retrieve the latest account state by account ID
+  async fn pull_state(&self, account_id: &str) -> Result<AccountState, String>;
+
+  // Retrieve a specific delta by nonce
+  async fn pull_delta(&self, account_id: &str, nonce: u64) -> Result<DeltaObject, String>;
+
+  // Retrieve all deltas after a given nonce (exclusive)
+  async fn pull_deltas_after(
+    &self,
+    account_id: &str,
+    from_nonce: u64,
+  ) -> Result<Vec<DeltaObject>, String>;
+}
+```
+
+## Processes
+
+### Services overview
+
+- **configure_account**: creates a new account by validating the provided initial state against the network, persisting it, and storing account metadata (auth, storage type, timestamps).
+- **push_delta**: verifies the delta against the current state, computes the new commitment, attaches an acknowledgement, and either enqueues it as a candidate (canonicalization enabled) or immediately applies it and marks it canonical (optimistic mode).
+- **get_state**: authenticates and returns the latest persisted account state.
+- **get_delta**: authenticates and returns a specific delta by nonce.
+- **get_delta_since**: authenticates, fetches deltas after a given nonce (excluding discarded), merges their payloads via the network client, and returns a single merged delta snapshot.
+
+### Canonicalization
+
+Canonicalization promotes candidate deltas to canonical only after the resulting state is verified on-chain. It runs as a background worker when canonicalization is enabled.
+
+- **Modes**
+  - **Candidate mode (canonicalization enabled)**: `push_delta` stores deltas as `candidate` with a timestamp. A background worker periodically evaluates them.
+  - **Optimistic mode (canonicalization disabled)**: `push_delta` immediately applies the delta, updates state, and stores the delta as `canonical`.
+
+- **Worker loop (candidate mode)**
+  - Runs every `check_interval_seconds` (default 60 secs).
+  - For each account:
+    - Pull all deltas and select ready candidates using a time-based filter (candidate for at least `delay_seconds`).
+    - For each candidate delta in nonce order:
+      1) Fetch current persisted state.
+      2) Apply the delta using the `NetworkClient.apply_delta` function to compute the expected new state and commitment.
+      3) Verify the resulting state on-chain via `NetworkClient.verify_state`.
+      4) If the on-chain commitment matches the delta’s `new_commitment`:
+         - Update the persisted account state with the new state and commitment.
+         - Optionally refresh account auth via `NetworkClient.should_update_auth` and persist metadata if needed.
+         - Mark the delta `canonical` with the current timestamp and persist it.
+      5) Otherwise:
+         - Mark the delta `discarded` with the current timestamp and persist it.
+
+- **State machine**
+  - `candidate` → `canonical` (on-chain commitment match) or `candidate` → `discarded` (mismatch).
+  - Only non-discarded deltas contribute to `get_delta_since` merging.

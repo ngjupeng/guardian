@@ -66,6 +66,35 @@ impl FilesystemService {
             .join("deltas")
             .join(format!("{nonce}.json"))
     }
+
+    async fn list_delta_filenames(&self, account_id: &str) -> Result<Vec<String>, String> {
+        let deltas_dir = self.app_path.join(account_id).join("deltas");
+
+        if !deltas_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = fs::read_dir(&deltas_dir)
+            .await
+            .map_err(|e| format!("Failed to read deltas directory: {e}"))?;
+
+        let mut deltas = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to read directory entry: {e}"))?
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".json") {
+                    deltas.push(name.to_string());
+                }
+            }
+        }
+
+        deltas.sort_by_key(|name| name.trim_end_matches(".json").parse::<u64>().unwrap_or(0));
+
+        Ok(deltas)
+    }
 }
 
 #[async_trait]
@@ -119,7 +148,7 @@ impl StorageBackend for FilesystemService {
         account_id: &str,
         from_nonce: u64,
     ) -> Result<Vec<DeltaObject>, String> {
-        let deltas_filenames = self.list_deltas(account_id).await?;
+        let deltas_filenames = self.list_delta_filenames(account_id).await?;
 
         let mut deltas = Vec::new();
         for filename in deltas_filenames {
@@ -140,34 +169,4 @@ impl StorageBackend for FilesystemService {
         Ok(deltas)
     }
 
-    async fn list_deltas(&self, account_id: &str) -> Result<Vec<String>, String> {
-        let deltas_dir = self.app_path.join(account_id).join("deltas");
-
-        // If directory doesn't exist, return empty list
-        if !deltas_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut entries = fs::read_dir(&deltas_dir)
-            .await
-            .map_err(|e| format!("Failed to read deltas directory: {e}"))?;
-
-        let mut deltas = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("Failed to read directory entry: {e}"))?
-        {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".json") {
-                    deltas.push(name.to_string());
-                }
-            }
-        }
-
-        // Sort by nonce (extract number from filename)
-        deltas.sort_by_key(|name| name.trim_end_matches(".json").parse::<u64>().unwrap_or(0));
-
-        Ok(deltas)
-    }
 }

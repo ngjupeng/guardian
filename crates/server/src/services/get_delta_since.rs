@@ -28,9 +28,10 @@ pub async fn get_delta_since(
         .await
         .map_err(|e| PsmError::StorageError(format!("Failed to fetch deltas: {e}")))?;
 
+    // Only include canonical deltas to avoid surfacing candidates that may be discarded later
     let deltas: Vec<DeltaObject> = all_deltas
         .into_iter()
-        .filter(|delta| !delta.status.is_discarded())
+        .filter(|delta| delta.status.is_canonical())
         .collect();
 
     if deltas.is_empty() {
@@ -52,6 +53,7 @@ pub async fn get_delta_since(
 
     let last_delta = deltas.last().unwrap();
 
+    // Merged result is a materialized snapshot; mark as canonical by default
     let merged_delta = DeltaObject {
         account_id: params.account_id,
         nonce: last_delta.nonce,

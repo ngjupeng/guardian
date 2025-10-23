@@ -178,8 +178,6 @@ pub trait StorageBackend: Send + Sync {
         from_nonce: u64,
     ) -> Result<Vec<DeltaObject>, String>;
 
-    /// List all deltas for an account
-    async fn list_deltas(&self, account_id: &str) -> Result<Vec<String>, String>;
 }
 
 /// Storage registry that maps storage types to their backend implementations

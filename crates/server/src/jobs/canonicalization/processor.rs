@@ -134,22 +134,52 @@ impl DeltasProcessorBase {
     }
 
     async fn process_candidate(&self, delta: DeltaObject) -> Result<()> {
-        let is_canonical = {
-            let mut client = self.state.network_client.lock().await;
+        let account_metadata = self
+            .state
+            .metadata
+            .get(&delta.account_id)
+            .await
+            .map_err(|e| PsmError::StorageError(format!("Failed to get metadata: {e}")))?
+            .ok_or_else(|| PsmError::AccountNotFound(delta.account_id.clone()))?;
+
+        let storage_backend = self
+            .state
+            .storage
+            .get(&account_metadata.storage_type)
+            .map_err(PsmError::ConfigurationError)?;
+
+        let current_state = storage_backend
+            .pull_state(&delta.account_id)
+            .await
+            .map_err(|e| PsmError::StorageError(format!("Failed to get current state: {e}")))?;
+
+        let (new_state_json, _) = {
+            let client = self.state.network_client.lock().await;
             client
-                .is_canonical(&delta)
-                .await
-                .map_err(PsmError::NetworkError)?
+                .apply_delta(&current_state.state_json, &delta.delta_payload)
+                .map_err(PsmError::InvalidDelta)?
         };
 
-        if is_canonical {
-            self.canonicalize_verified_delta(delta).await
-        } else {
-            self.discard_mismatched_delta(delta).await
+        let verify_result = {
+            let mut client = self.state.network_client.lock().await;
+            client.verify_state(&delta.account_id, &new_state_json).await
+        };
+
+        match verify_result {
+            Ok(on_chain_commitment) if delta.new_commitment == on_chain_commitment => {
+                self.canonicalize_verified_delta(delta, new_state_json, on_chain_commitment)
+                    .await
+            }
+            _ => self.discard_mismatched_delta(delta).await,
         }
     }
 
-    async fn canonicalize_verified_delta(&self, delta: DeltaObject) -> Result<()> {
+    async fn canonicalize_verified_delta(
+        &self,
+        delta: DeltaObject,
+        new_state_json: serde_json::Value,
+        new_commitment: String,
+    ) -> Result<()> {
         tracing::info!(
             account_id = %delta.account_id,
             nonce = delta.nonce,
@@ -174,13 +204,6 @@ impl DeltasProcessorBase {
             .pull_state(&delta.account_id)
             .await
             .map_err(|e| PsmError::StorageError(format!("Failed to get current state: {e}")))?;
-
-        let (new_state_json, new_commitment) = {
-            let client = self.state.network_client.lock().await;
-            client
-                .apply_delta(&current_state.state_json, &delta.delta_payload)
-                .map_err(PsmError::InvalidDelta)?
-        };
 
         let now = self.state.clock.now_rfc3339();
 

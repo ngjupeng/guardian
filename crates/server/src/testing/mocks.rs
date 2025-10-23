@@ -11,10 +11,8 @@ type StdResult<T, E> = std::result::Result<T, E>;
 pub struct MockNetworkClient {
     pub verify_state_responses: Arc<StdMutex<Vec<StdResult<String, String>>>>,
     pub verify_state_calls: Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
-    pub verify_on_chain_state_responses: Arc<StdMutex<Vec<StdResult<String, String>>>>,
     pub verify_delta_responses: Arc<StdMutex<Vec<StdResult<(), String>>>>,
     pub apply_delta_responses: Arc<StdMutex<Vec<StdResult<(serde_json::Value, String), String>>>>,
-    pub is_canonical_responses: Arc<StdMutex<Vec<StdResult<bool, String>>>>,
     pub should_update_auth_responses:
         Arc<StdMutex<Vec<StdResult<Option<Auth>, String>>>>,
 }
@@ -29,14 +27,6 @@ impl MockNetworkClient {
         self
     }
 
-    pub fn with_verify_on_chain_state(self, response: StdResult<String, String>) -> Self {
-        self.verify_on_chain_state_responses
-            .lock()
-            .unwrap()
-            .push(response);
-        self
-    }
-
     pub fn with_verify_delta(self, response: StdResult<(), String>) -> Self {
         self.verify_delta_responses.lock().unwrap().push(response);
         self
@@ -47,11 +37,6 @@ impl MockNetworkClient {
         response: StdResult<(serde_json::Value, String), String>,
     ) -> Self {
         self.apply_delta_responses.lock().unwrap().push(response);
-        self
-    }
-
-    pub fn with_is_canonical(self, response: StdResult<bool, String>) -> Self {
-        self.is_canonical_responses.lock().unwrap().push(response);
         self
     }
 
@@ -84,14 +69,6 @@ impl NetworkClient for MockNetworkClient {
             .push((account_id.to_string(), state_json.clone()));
 
         self.verify_state_responses
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(|| Ok("mock_commitment".to_string()))
-    }
-
-    async fn verify_on_chain_state(&mut self, _account_id: &str) -> StdResult<String, String> {
-        self.verify_on_chain_state_responses
             .lock()
             .unwrap()
             .pop()
@@ -134,17 +111,6 @@ impl NetworkClient for MockNetworkClient {
         Ok(())
     }
 
-    async fn is_canonical(
-        &mut self,
-        _delta: &crate::storage::DeltaObject,
-    ) -> StdResult<bool, String> {
-        self.is_canonical_responses
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or(Ok(false))
-    }
-
     async fn should_update_auth(
         &mut self,
         _state_json: &serde_json::Value,
@@ -167,7 +133,6 @@ pub struct MockStorageBackend {
     pub pull_delta_responses: Arc<StdMutex<Vec<StdResult<crate::storage::DeltaObject, String>>>>,
     pub pull_deltas_after_responses:
         Arc<StdMutex<Vec<StdResult<Vec<crate::storage::DeltaObject>, String>>>>,
-    pub list_deltas_responses: Arc<StdMutex<Vec<StdResult<Vec<String>, String>>>>,
 }
 
 impl MockStorageBackend {
@@ -206,10 +171,6 @@ impl MockStorageBackend {
         self
     }
 
-    pub fn with_list_deltas(self, response: StdResult<Vec<String>, String>) -> Self {
-        self.list_deltas_responses.lock().unwrap().push(response);
-        self
-    }
 
     pub fn get_submit_state_calls(&self) -> Vec<AccountState> {
         self.submit_state_calls.lock().unwrap().clone()
@@ -272,13 +233,6 @@ impl StorageBackend for MockStorageBackend {
             .unwrap_or_else(|| Ok(vec![]))
     }
 
-    async fn list_deltas(&self, _account_id: &str) -> StdResult<Vec<String>, String> {
-        self.list_deltas_responses
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(|| Ok(vec![]))
-    }
 }
 
 #[derive(Clone, Default)]

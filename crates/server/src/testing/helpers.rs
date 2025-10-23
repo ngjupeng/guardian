@@ -43,7 +43,7 @@ impl IntegrationMockNetworkClient {
 impl NetworkClient for IntegrationMockNetworkClient {
     async fn verify_state(
         &mut self,
-        _account_id: &str,
+        account_id: &str,
         state_json: &serde_json::Value,
     ) -> Result<String, String> {
         use miden_objects::account::Account;
@@ -51,20 +51,20 @@ impl NetworkClient for IntegrationMockNetworkClient {
         let account = Account::from_json(state_json)
             .map_err(|e| format!("Failed to deserialize account: {e}"))?;
 
-        let commitment = account.commitment();
-        let commitment_hex = format!("0x{}", hex::encode(commitment.as_bytes()));
+        let local_commitment = account.commitment();
+        let local_commitment_hex = format!("0x{}", hex::encode(local_commitment.as_bytes()));
 
-        self.initial_commitments
-            .insert(_account_id.to_string(), commitment_hex.clone());
-
-        Ok(commitment_hex)
-    }
-
-    async fn verify_on_chain_state(&mut self, account_id: &str) -> Result<String, String> {
-        if let Some(commitment) = self.initial_commitments.get(account_id) {
-            Ok(commitment.clone())
+        if let Some(on_chain_commitment) = self.initial_commitments.get(account_id) {
+            if &local_commitment_hex != on_chain_commitment {
+                return Err(format!(
+                    "Commitment mismatch for account '{account_id}': local={local_commitment_hex}, on-chain={on_chain_commitment}"
+                ));
+            }
+            Ok(on_chain_commitment.clone())
         } else {
-            self.miden_client.verify_on_chain_state(account_id).await
+            self.initial_commitments
+                .insert(account_id.to_string(), local_commitment_hex.clone());
+            Ok(local_commitment_hex)
         }
     }
 
@@ -96,11 +96,6 @@ impl NetworkClient for IntegrationMockNetworkClient {
 
     fn validate_account_id(&self, account_id: &str) -> Result<(), String> {
         self.miden_client.validate_account_id(account_id)
-    }
-
-    async fn is_canonical(&mut self, delta: &crate::storage::DeltaObject) -> Result<bool, String> {
-        let on_chain_commitment = self.verify_on_chain_state(&delta.account_id).await?;
-        Ok(delta.new_commitment == on_chain_commitment)
     }
 
     async fn should_update_auth(
