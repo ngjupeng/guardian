@@ -30,7 +30,6 @@ miden-objects = { version = "0.11.4", features = ["testing"] }
 miden-rpc-client = { path = "../miden-rpc-client" }
 
 # internal crates
-miden-keystore = { path = "../miden-keystore" }
 private-state-manager-shared = { path = "../shared" }
 
 [build-dependencies]

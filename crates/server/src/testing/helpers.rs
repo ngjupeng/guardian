@@ -8,7 +8,6 @@ use miden_objects::crypto::hash::rpo::Rpo256;
 use miden_objects::utils::Serializable;
 use miden_objects::{Felt, FieldElement, Word};
 use private_state_manager_shared::{FromJson, ToJson};
-use miden_keystore::FilesystemKeyStore;
 
 use crate::api::grpc::StateManagerService;
 use crate::network::{NetworkClient, NetworkType};
@@ -127,8 +126,6 @@ pub async fn create_test_app_state() -> AppState {
     let metadata = FilesystemMetadataStore::new(metadata_dir)
         .await
         .expect("Failed to create metadata");
-    let keystore = FilesystemKeyStore::<rand_chacha::ChaCha20Rng>::new(keystore_dir)
-        .expect("Failed to create keystore");
 
     let mut storage_backends: HashMap<StorageType, Arc<dyn StorageBackend>> = HashMap::new();
     storage_backends.insert(StorageType::Filesystem, Arc::new(storage));
@@ -141,11 +138,15 @@ pub async fn create_test_app_state() -> AppState {
 
     let mock_client = IntegrationMockNetworkClient::new(miden_client);
 
+    let signing = crate::signing::Signer::miden_falcon_rpo(
+        crate::signing::KeystoreConfig::Filesystem(keystore_dir)
+    ).expect("Failed to create signing");
+
     AppState {
         storage: storage_registry,
         metadata: Arc::new(metadata),
         network_client: Arc::new(tokio::sync::Mutex::new(mock_client)),
-        keystore: Arc::new(keystore),
+        signing,
         canonicalization_mode: crate::canonicalization::CanonicalizationMode::default(),
         clock: Arc::new(crate::clock::SystemClock),
     }

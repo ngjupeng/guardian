@@ -19,6 +19,8 @@ pub enum PsmError {
     CommitmentMismatch { expected: String, actual: String },
     InvalidAccountId(String),
     InvalidDelta(String),
+    InvalidCommitment(String),
+    SigningError(String),
     ConfigurationError(String),
 }
 
@@ -35,7 +37,9 @@ impl PsmError {
             PsmError::InvalidInput(_) => StatusCode::BAD_REQUEST,
             PsmError::InvalidAccountId(_) => StatusCode::BAD_REQUEST,
             PsmError::InvalidDelta(_) => StatusCode::BAD_REQUEST,
+            PsmError::InvalidCommitment(_) => StatusCode::BAD_REQUEST,
             PsmError::CommitmentMismatch { .. } => StatusCode::BAD_REQUEST,
+            PsmError::SigningError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PsmError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PsmError::NetworkError(_) => StatusCode::BAD_GATEWAY,
             PsmError::ConfigurationError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -54,7 +58,9 @@ impl PsmError {
             PsmError::InvalidInput(_) => tonic::Code::InvalidArgument,
             PsmError::InvalidAccountId(_) => tonic::Code::InvalidArgument,
             PsmError::InvalidDelta(_) => tonic::Code::InvalidArgument,
+            PsmError::InvalidCommitment(_) => tonic::Code::InvalidArgument,
             PsmError::CommitmentMismatch { .. } => tonic::Code::InvalidArgument,
+            PsmError::SigningError(_) => tonic::Code::Internal,
             PsmError::StorageError(_) => tonic::Code::Internal,
             PsmError::NetworkError(_) => tonic::Code::Unavailable,
             PsmError::ConfigurationError(_) => tonic::Code::Internal,
@@ -90,6 +96,8 @@ impl fmt::Display for PsmError {
             }
             PsmError::InvalidAccountId(msg) => write!(f, "Invalid account ID: {msg}"),
             PsmError::InvalidDelta(msg) => write!(f, "Invalid delta: {msg}"),
+            PsmError::InvalidCommitment(msg) => write!(f, "Invalid commitment: {msg}"),
+            PsmError::SigningError(msg) => write!(f, "Signing error: {msg}"),
             PsmError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
         }
     }
@@ -133,3 +141,27 @@ impl From<PsmError> for tonic::Status {
 }
 
 pub type Result<T> = std::result::Result<T, PsmError>;
+
+// Signing-specific errors
+#[derive(Debug)]
+pub enum MidenFalconRpoError {
+    StorageError(String),
+    DecodingError(String),
+}
+
+impl fmt::Display for MidenFalconRpoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MidenFalconRpoError::StorageError(msg) => write!(f, "Storage error: {msg}"),
+            MidenFalconRpoError::DecodingError(msg) => write!(f, "Decoding error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for MidenFalconRpoError {}
+
+impl From<MidenFalconRpoError> for PsmError {
+    fn from(err: MidenFalconRpoError) -> Self {
+        PsmError::SigningError(err.to_string())
+    }
+}

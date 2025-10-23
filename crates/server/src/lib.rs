@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod logging;
 pub mod network;
 pub mod services;
+pub mod signing;
 pub mod state;
 pub mod storage;
 

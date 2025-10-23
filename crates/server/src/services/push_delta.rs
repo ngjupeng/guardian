@@ -4,6 +4,7 @@ use crate::error::{PsmError, Result};
 use crate::services::resolve_account;
 use crate::state::AppState;
 use crate::storage::{AccountState, DeltaObject, DeltaStatus, StorageBackend};
+use miden_objects::{Felt, Word, crypto::hash::rpo::Rpo256, utils::Serializable};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -141,6 +142,14 @@ async fn save_as_canonical(
     canonical_delta.new_commitment = new_commitment.to_string();
     canonical_delta.status = DeltaStatus::canonical(timestamp.to_string());
 
+    let commitment_digest = commitment_to_digest(new_commitment)?;
+    let signature = state
+        .signing
+        .sign_with_server_key(commitment_digest)
+        .map_err(|e| PsmError::SigningError(format!("Failed to sign commitment: {e}")))?;
+
+    canonical_delta.ack_sig = Some(hex::encode(signature.to_bytes()));
+
     let (new_state_json, _) = {
         let client = state.network_client.lock().await;
         client
@@ -167,4 +176,34 @@ async fn save_as_canonical(
         .map_err(|e| PsmError::StorageError(format!("Failed to submit delta: {e}")))?;
 
     Ok(())
+}
+
+fn commitment_to_digest(commitment_hex: &str) -> Result<Word> {
+    let commitment_hex = commitment_hex.strip_prefix("0x").unwrap_or(commitment_hex);
+
+    let bytes = hex::decode(commitment_hex)
+        .map_err(|e| PsmError::InvalidCommitment(format!("Invalid hex: {e}")))?;
+
+    if bytes.len() != 32 {
+        return Err(PsmError::InvalidCommitment(format!(
+            "Commitment must be 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+
+    let mut felts = Vec::new();
+    for chunk in bytes.chunks(8) {
+        let mut arr = [0u8; 8];
+        arr[..chunk.len()].copy_from_slice(chunk);
+        let value = u64::from_le_bytes(arr);
+        felts.push(
+            Felt::try_from(value)
+                .map_err(|e| PsmError::InvalidCommitment(format!("Invalid field element: {e}")))?,
+        );
+    }
+
+    let message_elements = vec![felts[0], felts[1], felts[2], felts[3]];
+
+    let digest = Rpo256::hash_elements(&message_elements);
+    Ok(digest)
 }

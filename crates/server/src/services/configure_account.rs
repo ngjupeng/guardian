@@ -86,7 +86,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use miden_keystore::FilesystemKeyStore;
 
     fn create_test_app_state(
         network_client: MockNetworkClient,
@@ -100,14 +99,16 @@ mod tests {
         );
 
         let keystore_dir = std::env::temp_dir().join(format!("test_keystore_{}", uuid::Uuid::new_v4()));
-        let keystore = FilesystemKeyStore::<rand_chacha::ChaCha20Rng>::new(keystore_dir)
-            .expect("Failed to create test keystore");
+
+        let signing = crate::signing::Signer::miden_falcon_rpo(
+            crate::signing::KeystoreConfig::Filesystem(keystore_dir)
+        ).expect("Failed to create signing");
 
         AppState {
             storage: StorageRegistry::new(backends),
             metadata: Arc::new(metadata_store),
             network_client: Arc::new(Mutex::new(network_client)),
-            keystore: Arc::new(keystore),
+            signing,
             canonicalization_mode: CanonicalizationMode::Optimistic,
             clock: Arc::new(crate::clock::test::MockClock::default()),
         }

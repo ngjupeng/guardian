@@ -9,9 +9,10 @@ use miden_objects::utils::{Deserializable, Serializable};
 use miden_objects::Word;
 use rand::{Rng, SeedableRng};
 
-use crate::error::{KeyStoreError, Result};
+use crate::error::MidenFalconRpoError;
 
-/// Filesystem-based keystore for storing and managing cryptographic keys
+type Result<T> = std::result::Result<T, MidenFalconRpoError>;
+
 #[derive(Debug, Clone)]
 pub struct FilesystemKeyStore<R: Rng + Send + Sync> {
     rng: Arc<RwLock<R>>,
@@ -19,17 +20,9 @@ pub struct FilesystemKeyStore<R: Rng + Send + Sync> {
 }
 
 impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
-    /// Creates a new FilesystemKeyStore with a custom RNG
-    ///
-    /// # Arguments
-    /// * `keys_directory` - Directory path where keys will be stored
-    /// * `rng` - Random number generator for signature generation
-    ///
-    /// # Errors
-    /// Returns an error if the directory cannot be created
     pub fn with_rng(keys_directory: PathBuf, rng: R) -> Result<Self> {
         fs::create_dir_all(&keys_directory).map_err(|e| {
-            KeyStoreError::StorageError(format!(
+            MidenFalconRpoError::StorageError(format!(
                 "Failed to create keys directory: {e}"
             ))
         })?;
@@ -40,10 +33,6 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
         })
     }
 
-    /// Adds a key to the keystore
-    ///
-    /// Keys are stored as hex-encoded files with filenames derived from
-    /// hashing the public key commitment
     pub fn add_key(&self, key: &SecretKey) -> Result<()> {
         let pub_key = key.public_key();
         let pub_key_word: Word = pub_key.into();
@@ -56,7 +45,7 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
             .truncate(true)
             .open(&file_path)
             .map_err(|e| {
-                KeyStoreError::StorageError(format!(
+                MidenFalconRpoError::StorageError(format!(
                     "Failed to open key file {filename}: {e}"
                 ))
             })?;
@@ -66,13 +55,13 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
         let hex_encoded = hex::encode(key_bytes);
 
         writer.write_all(hex_encoded.as_bytes()).map_err(|e| {
-            KeyStoreError::StorageError(format!(
+            MidenFalconRpoError::StorageError(format!(
                 "Failed to write key to file {filename}: {e}"
             ))
         })?;
 
         writer.flush().map_err(|e| {
-            KeyStoreError::StorageError(format!(
+            MidenFalconRpoError::StorageError(format!(
                 "Failed to flush key file {filename}: {e}"
             ))
         })?;
@@ -80,7 +69,6 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
         Ok(())
     }
 
-    /// Retrieves a key from the keystore by its public key
     pub fn get_key(&self, pub_key: Word) -> Result<SecretKey> {
         let filename = hash_pub_key(pub_key);
         let file_path = self.keys_directory.join(&filename);
@@ -89,7 +77,7 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
             .read(true)
             .open(&file_path)
             .map_err(|e| {
-                KeyStoreError::StorageError(format!(
+                MidenFalconRpoError::StorageError(format!(
                     "Failed to open key file {filename}: {e}"
                 ))
             })?;
@@ -98,41 +86,47 @@ impl<R: Rng + Send + Sync> FilesystemKeyStore<R> {
         let mut hex_encoded = String::new();
 
         reader.read_line(&mut hex_encoded).map_err(|e| {
-            KeyStoreError::StorageError(format!(
+            MidenFalconRpoError::StorageError(format!(
                 "Failed to read key from file {filename}: {e}"
             ))
         })?;
 
         let key_bytes = hex::decode(hex_encoded.trim()).map_err(|e| {
-            KeyStoreError::DecodingError(format!(
+            MidenFalconRpoError::DecodingError(format!(
                 "Failed to decode hex key from file {filename}: {e}"
             ))
         })?;
 
         SecretKey::read_from_bytes(&key_bytes).map_err(|e| {
-            KeyStoreError::DecodingError(format!(
+            MidenFalconRpoError::DecodingError(format!(
                 "Failed to deserialize key from file {filename}: {e}"
             ))
         })
     }
 
-    /// Sign a message using the secret key associated with the given public key
     pub fn sign(&self, pub_key: Word, message: Word) -> Result<Signature> {
         let secret_key = self.get_key(pub_key)?;
         let mut rng_guard = self.rng.write().unwrap();
         Ok(secret_key.sign_with_rng::<R>(message, &mut *rng_guard))
     }
+
+    pub fn generate_key(&self) -> Result<Word> {
+        let secret_key = SecretKey::new();
+        let pub_key: Word = secret_key.public_key().into();
+
+        self.add_key(&secret_key)?;
+
+        Ok(pub_key)
+    }
 }
 
 impl<R: Rng + SeedableRng + Send + Sync> FilesystemKeyStore<R> {
-    /// Creates a new FilesystemKeyStore with a seeded RNG
     pub fn new(keys_directory: PathBuf) -> Result<Self> {
         let rng = R::seed_from_u64(rand::random());
         Self::with_rng(keys_directory, rng)
     }
 }
 
-/// Hashes a public key to create a filename-safe string
 fn hash_pub_key(pub_key: Word) -> String {
     let mut hasher = DefaultHasher::new();
     pub_key.hash(&mut hasher);
@@ -157,7 +151,6 @@ mod tests {
 
         assert_eq!(secret_key.to_bytes(), retrieved_key.to_bytes());
 
-        // Cleanup
         std::fs::remove_dir_all(temp_dir).ok();
     }
 

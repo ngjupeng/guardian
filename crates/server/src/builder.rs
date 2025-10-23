@@ -20,11 +20,9 @@ use crate::canonicalization::CanonicalizationMode;
 use crate::clock::SystemClock;
 use crate::logging::LoggingConfig;
 use crate::network::{NetworkType, miden::MidenNetworkClient};
+use crate::signing::Signer;
 use crate::state::AppState;
 use crate::storage::{MetadataStore, StorageRegistry};
-
-use miden_keystore::FilesystemKeyStore;
-use rand_chacha::ChaCha20Rng;
 
 /// Builder for configuring and creating a server instance
 pub struct ServerBuilder {
@@ -302,14 +300,20 @@ impl ServerBuilder {
             .await
             .map_err(|e| format!("Failed to create network client: {e}"))?;
 
-        let keystore = FilesystemKeyStore::<ChaCha20Rng>::new(keystore_path)
-            .map_err(|e| format!("Failed to create keystore: {e}"))?;
+        let signing = Signer::miden_falcon_rpo(
+            crate::signing::KeystoreConfig::Filesystem(keystore_path)
+        ).map_err(|e| format!("Failed to initialize server signing: {e}"))?;
+
+        tracing::info!(
+            server_pubkey = ?signing.server_pubkey(),
+            "Server signing key initialized"
+        );
 
         let app_state = AppState {
             storage,
             metadata,
             network_client: Arc::new(Mutex::new(network_client)),
-            keystore: Arc::new(keystore),
+            signing,
             canonicalization_mode: self.canonicalization_mode,
             clock: Arc::new(SystemClock),
         };

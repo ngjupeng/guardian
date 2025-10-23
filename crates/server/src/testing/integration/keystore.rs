@@ -13,12 +13,12 @@ async fn test_keystore_add_and_retrieve_key() {
     let pub_key_word: Word = public_key.into();
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key)
         .expect("Failed to add key");
 
     let retrieved_key = state
-        .keystore
+        .signing
         .get_key(pub_key_word)
         .expect("Failed to retrieve key");
 
@@ -38,14 +38,14 @@ async fn test_keystore_sign_message() {
     let pub_key_word: Word = public_key.into();
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key)
         .expect("Failed to add key");
 
     let message: Word = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)].into();
 
     let signature = state
-        .keystore
+        .signing
         .sign(pub_key_word, message)
         .expect("Failed to sign message");
 
@@ -64,7 +64,7 @@ async fn test_keystore_sign_account_id() {
     let pub_key_word: Word = public_key.into();
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key)
         .expect("Failed to add key");
 
@@ -87,7 +87,7 @@ async fn test_keystore_sign_account_id() {
     let message = Rpo256::hash_elements(&message_elements);
 
     let signature = state
-        .keystore
+        .signing
         .sign(pub_key_word, message)
         .expect("Failed to sign account ID");
 
@@ -103,7 +103,7 @@ async fn test_keystore_get_nonexistent_key() {
 
     let fake_pub_key: Word = [Felt::new(99), Felt::new(88), Felt::new(77), Felt::new(66)].into();
 
-    let result = state.keystore.get_key(fake_pub_key);
+    let result = state.signing.get_key(fake_pub_key);
 
     assert!(
         result.is_err(),
@@ -124,22 +124,22 @@ async fn test_keystore_multiple_keys() {
     let pub_key_word2: Word = public_key2.into();
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key1)
         .expect("Failed to add first key");
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key2)
         .expect("Failed to add second key");
 
     let retrieved_key1 = state
-        .keystore
+        .signing
         .get_key(pub_key_word1)
         .expect("Failed to retrieve first key");
 
     let retrieved_key2 = state
-        .keystore
+        .signing
         .get_key(pub_key_word2)
         .expect("Failed to retrieve second key");
 
@@ -174,14 +174,14 @@ async fn test_keystore_signature_verification_with_wrong_key() {
     let public_key2 = secret_key2.public_key();
 
     state
-        .keystore
+        .signing
         .add_key(&secret_key1)
         .expect("Failed to add key");
 
     let message: Word = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)].into();
 
     let signature = state
-        .keystore
+        .signing
         .sign(pub_key_word1, message)
         .expect("Failed to sign message");
 
