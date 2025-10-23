@@ -90,21 +90,6 @@ In most networks, the nonce is an incremental counter that serves as a protectio
   - General-purpose database semantics (transactions, secondary indexes).
   - Exposing private state to untrusted parties.
 
-## Trust model
-
-- The client trusts: its own keys, the selected network’s validation rules, and the ack signer public key.
-- The client does not need to trust: the server operator (when running in enclave + encrypted storage), or other account users beyond configured cosigners.
-- Threats: malicious operator, network partitions, replay, tampering-at-rest, downgrade of canonicalization policy.
-
-## Normative invariants (MUST/SHOULD)
-
-- State and Delta payloads MUST be deterministic JSON; fields MUST produce stable commitments.
-- Deltas MUST be append-only and reference `prev_commitment` that matches the persisted state at acceptance time.
-- In canonicalization-enabled mode, deltas MUST be stored as `candidate` first and only become `canonical` after on-chain verification.
-- `get_delta_since` MUST exclude `discarded` and SHOULD exclude `candidate` deltas (default behavior).
-- Storage updates for making a delta canonical SHOULD atomically persist the updated state and the updated delta status.
-- Ack signatures MUST be computed over a canonical serialization of the delta content with domain separation.
-
 ## Related documents
 
 - API (HTTP/gRPC): [api.md](./api.md)

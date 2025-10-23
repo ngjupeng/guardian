@@ -2,6 +2,10 @@
 
 Warning: This is a work in progress.
 
+### Specification
+
+See the [Specification](spec/index.md) for an overview of the system design. It describes core concepts (State and Delta), components (API, Metadata, Auth, Acknowledger, Network, Storage), and key processes such as canonicalization. If you’re integrating or extending the system, start there to understand invariants, defaults, and extension points.
+
 ### Project Structure
 
 - **[crates/server](crates/server/README.md)** - Server for managing private account states and deltas
@@ -58,3 +62,21 @@ docker-compose down
 The HTTP server will be available at `http://localhost:3000`
 
 The gRPC server will be available at `localhost:50051`
+
+### Testing
+
+Run the full workspace test suite:
+
+```bash
+cargo test --workspace
+```
+
+Feature-gated test groups:
+
+```bash
+# Run only integration tests
+cargo test -p private-state-manager-server --features integration
+
+# Run only e2e tests
+cargo test -p private-state-manager-server --features e2e
+```

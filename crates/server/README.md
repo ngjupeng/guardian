@@ -125,6 +125,16 @@ Run specific integration tests:
 cargo test --package private-state-manager-server --test e2e_http_auth_test -- --test-threads=1
 ```
 
+Feature-gated test groups:
+
+```bash
+# Integration tests (requires network/mocks as applicable)
+cargo test -p private-state-manager-server --features integration
+
+# End-to-end tests
+cargo test -p private-state-manager-server --features e2e
+```
+
 ### Reproducible Builds
 
 The server binary has reproducible builds. Building from the same source code and target architecture always produces bit-for-bit identical binaries, regardless of the build machine.

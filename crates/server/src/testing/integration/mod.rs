@@ -1,9 +1,6 @@
-// Integration tests
-#[cfg(test)]
+// Integration tests (enabled with `--features integration`)
+#![cfg(feature = "integration")]
+
 mod auth_http;
-
-#[cfg(test)]
 mod auth_grpc;
-
-#[cfg(test)]
 mod miden_rpc_integration;
