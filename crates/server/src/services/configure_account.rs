@@ -80,6 +80,7 @@ pub async fn configure_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ack::{Acknowledger, MidenFalconRpoSigner};
     use crate::storage::{StorageBackend, StorageRegistry};
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use std::collections::HashMap;
@@ -100,16 +101,15 @@ mod tests {
         let keystore_dir =
             std::env::temp_dir().join(format!("test_keystore_{}", uuid::Uuid::new_v4()));
 
-        let signing = crate::signing::Signer::miden_falcon_rpo(
-            crate::signing::KeystoreConfig::Filesystem(keystore_dir),
-        )
-        .expect("Failed to create signing");
+        let signer = MidenFalconRpoSigner::new(keystore_dir)
+            .expect("Failed to create signer");
+        let ack = Acknowledger::FilesystemMidenFalconRpo(signer);
 
         AppState {
             storage: StorageRegistry::new(backends),
             metadata: Arc::new(metadata_store),
             network_client: Arc::new(Mutex::new(network_client)),
-            signing,
+            ack,
             canonicalization: None, // Optimistic mode for tests
             clock: Arc::new(crate::clock::test::MockClock::default()),
         }

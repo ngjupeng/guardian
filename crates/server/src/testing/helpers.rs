@@ -9,6 +9,7 @@ use miden_objects::utils::Serializable;
 use miden_objects::{Felt, FieldElement, Word};
 use private_state_manager_shared::{FromJson, ToJson};
 
+use crate::ack::{Acknowledger, MidenFalconRpoSigner};
 use crate::api::grpc::StateManagerService;
 use crate::network::{NetworkClient, NetworkType};
 use crate::state::AppState;
@@ -137,17 +138,15 @@ pub async fn create_test_app_state() -> AppState {
             .expect("Failed to create network client");
 
     let mock_client = IntegrationMockNetworkClient::new(miden_client);
-
-    let signing = crate::signing::Signer::miden_falcon_rpo(
-        crate::signing::KeystoreConfig::Filesystem(keystore_dir),
-    )
-    .expect("Failed to create signing");
+    let signer = MidenFalconRpoSigner::new(keystore_dir)
+        .expect("Failed to create signer");
+    let ack = Acknowledger::FilesystemMidenFalconRpo(signer);
 
     AppState {
         storage: storage_registry,
         metadata: Arc::new(metadata),
         network_client: Arc::new(tokio::sync::Mutex::new(mock_client)),
-        signing,
+        ack,
         canonicalization: Some(crate::canonicalization::CanonicalizationConfig::default()),
         clock: Arc::new(crate::clock::SystemClock),
     }

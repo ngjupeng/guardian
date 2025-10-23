@@ -17,10 +17,10 @@ use crate::api::http::{
     configure, get_delta, get_delta_head, get_delta_since, get_state, push_delta,
 };
 use crate::canonicalization::CanonicalizationConfig;
+use crate::ack::Acknowledger;
 use crate::clock::SystemClock;
 use crate::logging::LoggingConfig;
 use crate::network::{NetworkType, miden::MidenNetworkClient};
-use crate::signing::Signer;
 use crate::state::AppState;
 use crate::storage::{MetadataStore, StorageRegistry};
 
@@ -29,7 +29,7 @@ pub struct ServerBuilder {
     network_type: Option<NetworkType>,
     storage: Option<StorageRegistry>,
     metadata: Option<Arc<dyn MetadataStore>>,
-    keystore_path: Option<std::path::PathBuf>,
+    ack: Option<Acknowledger>,
     canonicalization: Option<CanonicalizationConfig>,
     logging_config: Option<LoggingConfig>,
     http_enabled: bool,
@@ -45,7 +45,7 @@ impl ServerBuilder {
             network_type: None,
             storage: None,
             metadata: None,
-            keystore_path: None,
+            ack: None,
             canonicalization: Some(CanonicalizationConfig::default()),
             logging_config: None,
             http_enabled: true,
@@ -126,20 +126,28 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the keystore path
+    /// Configure the acknowledger for server operations
     ///
-    /// The keystore stores cryptographic keys for signing operations.
+    /// The acknowledger handles acknowledgement of server operations (signatures, timestamps, etc.).
     ///
     /// # Example
     /// ```no_run
     /// use server::builder::ServerBuilder;
+    /// use server::ack::Acknowledger;
     /// use std::path::PathBuf;
     ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ack = Acknowledger::filesystem_miden_falcon_rpo(
+    ///     PathBuf::from("/var/psm/keystore")
+    /// )?;
+    ///
     /// let builder = ServerBuilder::new()
-    ///     .keystore(PathBuf::from("/var/psm/keystore"));
+    ///     .ack(ack);
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn keystore(mut self, path: std::path::PathBuf) -> Self {
-        self.keystore_path = Some(path);
+    pub fn ack(mut self, ack: Acknowledger) -> Self {
+        self.ack = Some(ack);
         self
     }
 
@@ -292,28 +300,24 @@ impl ServerBuilder {
             .metadata
             .ok_or("Metadata store not set. Use .metadata(...)")?;
 
-        let keystore_path = self
-            .keystore_path
-            .ok_or("Keystore path not set. Use .keystore(...)")?;
+        let ack = self
+            .ack
+            .ok_or("Acknowledger not set. Use .ack(...)")?;
 
         let network_client = MidenNetworkClient::from_network(network_type)
             .await
             .map_err(|e| format!("Failed to create network client: {e}"))?;
 
-        let signing =
-            Signer::miden_falcon_rpo(crate::signing::KeystoreConfig::Filesystem(keystore_path))
-                .map_err(|e| format!("Failed to initialize server signing: {e}"))?;
-
         tracing::info!(
-            server_pubkey = %signing.server_pubkey_hex(),
-            "Server signing key initialized"
+            server_pubkey = %ack.pubkey(),
+            "Server acknowledgement key initialized"
         );
 
         let app_state = AppState {
             storage,
             metadata,
             network_client: Arc::new(Mutex::new(network_client)),
-            signing,
+            ack,
             canonicalization: self.canonicalization,
             clock: Arc::new(SystemClock),
         };

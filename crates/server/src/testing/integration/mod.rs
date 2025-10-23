@@ -7,6 +7,3 @@ mod auth_grpc;
 
 #[cfg(test)]
 mod miden_rpc_integration;
-
-#[cfg(test)]
-mod keystore;

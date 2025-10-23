@@ -54,7 +54,7 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
 
     let mut result_delta = params.delta.clone();
     result_delta.new_commitment = new_commitment;
-    result_delta = state.signing.ack_delta(result_delta)?;
+    result_delta = state.ack.ack_delta(result_delta)?;
 
     let now = state.clock.now_rfc3339();
 

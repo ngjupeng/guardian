@@ -1,3 +1,6 @@
+//! Filesystem-based keystore for Miden Falcon RPO.
+//!
+//! The code is based on https://github.com/0xMiden/miden-client/blob/next/crates/rust-client/src/keystore/fs_keystore.rs
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Write};

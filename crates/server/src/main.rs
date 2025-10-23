@@ -1,5 +1,6 @@
 pub use private_state_manager_shared::{FromJson, ToJson};
 
+use server::ack::{Acknowledger, MidenFalconRpoSigner};
 use server::builder::ServerBuilder;
 use server::canonicalization::CanonicalizationConfig;
 use server::logging::LoggingConfig;
@@ -33,16 +34,18 @@ async fn main() {
         .await
         .expect("Failed to initialize metadata store");
 
-    // Set rules for canonicalization
-    let canonicalization = Some(CanonicalizationConfig::default());
+    // Initialize acknowledger
+    let signer = MidenFalconRpoSigner::new(keystore_path)
+        .expect("Failed to initialize signer");
+    let ack = Acknowledger::FilesystemMidenFalconRpo(signer);
 
     ServerBuilder::new()
         .with_logging(LoggingConfig::default())
         .network(NetworkType::MidenTestnet)
-        .with_canonicalization(canonicalization)
+        .with_canonicalization(Some(CanonicalizationConfig::default()))
         .storage(storage_registry)
         .metadata(Arc::new(metadata))
-        .keystore(keystore_path)
+        .ack(ack)
         .http(true, 3000)
         .grpc(true, 50051)
         .build()

@@ -11,8 +11,21 @@ use miden_objects::{Felt, Word};
 async fn test_server_signs_commitment_on_push_delta() {
     let state = create_test_app_state().await;
 
-    // Step 1: Get server's public key (automatically generated during state creation)
-    let server_public_key = state.signing.server_pubkey();
+    // Step 1: Get server's public key as hex (automatically generated during state creation)
+    let server_pubkey_hex = state.ack.pubkey();
+
+    // Parse the hex string back to PublicKey Word for verification
+    let server_pubkey_hex_stripped = server_pubkey_hex.strip_prefix("0x").unwrap_or(&server_pubkey_hex);
+    let pubkey_bytes = hex::decode(server_pubkey_hex_stripped).expect("Valid hex");
+
+    let mut pubkey_felts = Vec::new();
+    for chunk in pubkey_bytes.chunks(8) {
+        let mut arr = [0u8; 8];
+        arr[..chunk.len()].copy_from_slice(chunk);
+        pubkey_felts.push(Felt::new(u64::from_le_bytes(arr)));
+    }
+    let pubkey_word: Word = [pubkey_felts[0], pubkey_felts[1], pubkey_felts[2], pubkey_felts[3]].into();
+    let server_public_key = miden_objects::crypto::dsa::rpo_falcon512::PublicKey::new(pubkey_word);
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let (_, pubkey_hex, signature_hex) = generate_falcon_signature(&account_id_hex);
