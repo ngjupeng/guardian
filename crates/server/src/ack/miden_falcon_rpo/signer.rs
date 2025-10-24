@@ -1,17 +1,15 @@
-use crate::error::{MidenFalconRpoError, PsmError};
+use crate::error::{MidenFalconRpoResult as Result, PsmError};
 use crate::storage::DeltaObject;
 use miden_keystore::{FilesystemKeyStore, KeyStore};
 use miden_objects::{
-    Felt, Word,
     crypto::dsa::rpo_falcon512::{PublicKey, Signature},
     crypto::hash::rpo::Rpo256,
     utils::Serializable,
+    Felt, Word,
 };
 use rand_chacha::ChaCha20Rng;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-type Result<T> = std::result::Result<T, MidenFalconRpoError>;
 
 #[derive(Clone)]
 pub struct MidenFalconRpoSigner {

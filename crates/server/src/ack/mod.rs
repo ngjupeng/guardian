@@ -1,11 +1,9 @@
 pub mod miden_falcon_rpo;
 
-use crate::error::PsmError;
+use crate::error::Result;
 use crate::storage::DeltaObject;
 
 pub use miden_falcon_rpo::MidenFalconRpoSigner;
-
-pub type Result<T> = std::result::Result<T, PsmError>;
 
 /// Acknowledger for server operations
 ///

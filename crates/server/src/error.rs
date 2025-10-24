@@ -1,28 +1,42 @@
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 use std::fmt;
 
+/// Primary error type for PSM operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PsmError {
     AccountNotFound(String),
     AccountAlreadyExists(String),
+    InvalidAccountId(String),
+    StateNotFound(String),
+    DeltaNotFound { account_id: String, nonce: u64 },
+    InvalidDelta(String),
+    ConflictPendingDelta,
+    CommitmentMismatch { expected: String, actual: String },
+    InvalidCommitment(String),
     AuthenticationFailed(String),
     AuthorizationFailed(String),
+    InvalidInput(String),
     StorageError(String),
     NetworkError(String),
-    InvalidInput(String),
-    ConflictPendingDelta,
-    DeltaNotFound { account_id: String, nonce: u64 },
-    StateNotFound(String),
-    CommitmentMismatch { expected: String, actual: String },
-    InvalidAccountId(String),
-    InvalidDelta(String),
-    InvalidCommitment(String),
     SigningError(String),
     ConfigurationError(String),
 }
+
+/// Signing-specific error type for Miden Falcon RPO operations
+#[derive(Debug)]
+pub enum MidenFalconRpoError {
+    StorageError(String),
+    DecodingError(String),
+}
+
+/// Result type alias for PSM operations
+pub type Result<T> = std::result::Result<T, PsmError>;
+
+/// Result type alias for Miden Falcon RPO signing operations
+pub type MidenFalconRpoResult<T> = std::result::Result<T, MidenFalconRpoError>;
 
 impl PsmError {
     pub fn http_status(&self) -> StatusCode {
@@ -39,9 +53,9 @@ impl PsmError {
             PsmError::InvalidDelta(_) => StatusCode::BAD_REQUEST,
             PsmError::InvalidCommitment(_) => StatusCode::BAD_REQUEST,
             PsmError::CommitmentMismatch { .. } => StatusCode::BAD_REQUEST,
+            PsmError::NetworkError(_) => StatusCode::BAD_GATEWAY,
             PsmError::SigningError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PsmError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            PsmError::NetworkError(_) => StatusCode::BAD_GATEWAY,
             PsmError::ConfigurationError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -60,9 +74,9 @@ impl PsmError {
             PsmError::InvalidDelta(_) => tonic::Code::InvalidArgument,
             PsmError::InvalidCommitment(_) => tonic::Code::InvalidArgument,
             PsmError::CommitmentMismatch { .. } => tonic::Code::InvalidArgument,
+            PsmError::NetworkError(_) => tonic::Code::Unavailable,
             PsmError::SigningError(_) => tonic::Code::Internal,
             PsmError::StorageError(_) => tonic::Code::Internal,
-            PsmError::NetworkError(_) => tonic::Code::Unavailable,
             PsmError::ConfigurationError(_) => tonic::Code::Internal,
         }
     }
@@ -73,30 +87,24 @@ impl fmt::Display for PsmError {
         match self {
             PsmError::AccountNotFound(id) => write!(f, "Account '{id}' not found"),
             PsmError::AccountAlreadyExists(id) => write!(f, "Account '{id}' already exists"),
-            PsmError::AuthenticationFailed(msg) => write!(f, "Authentication failed: {msg}"),
-            PsmError::AuthorizationFailed(msg) => write!(f, "Authorization failed: {msg}"),
-            PsmError::StorageError(msg) => write!(f, "Storage error: {msg}"),
-            PsmError::NetworkError(msg) => write!(f, "Network error: {msg}"),
-            PsmError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
-            PsmError::ConflictPendingDelta => {
-                write!(
-                    f,
-                    "Cannot push new delta: there is already a non-canonical delta pending"
-                )
-            }
-            PsmError::DeltaNotFound { account_id, nonce } => {
-                write!(
-                    f,
-                    "Delta not found for account '{account_id}' at nonce {nonce}"
-                )
-            }
+            PsmError::InvalidAccountId(msg) => write!(f, "Invalid account ID: {msg}"),
             PsmError::StateNotFound(id) => write!(f, "State not found for account '{id}'"),
+            PsmError::DeltaNotFound { account_id, nonce } => {
+                write!(f, "Delta not found for account '{account_id}' at nonce {nonce}")
+            }
+            PsmError::InvalidDelta(msg) => write!(f, "Invalid delta: {msg}"),
+            PsmError::ConflictPendingDelta => {
+                write!(f, "Cannot push new delta: there is already a non-canonical delta pending")
+            }
             PsmError::CommitmentMismatch { expected, actual } => {
                 write!(f, "Commitment mismatch: expected {expected}, got {actual}")
             }
-            PsmError::InvalidAccountId(msg) => write!(f, "Invalid account ID: {msg}"),
-            PsmError::InvalidDelta(msg) => write!(f, "Invalid delta: {msg}"),
             PsmError::InvalidCommitment(msg) => write!(f, "Invalid commitment: {msg}"),
+            PsmError::AuthenticationFailed(msg) => write!(f, "Authentication failed: {msg}"),
+            PsmError::AuthorizationFailed(msg) => write!(f, "Authorization failed: {msg}"),
+            PsmError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
+            PsmError::StorageError(msg) => write!(f, "Storage error: {msg}"),
+            PsmError::NetworkError(msg) => write!(f, "Network error: {msg}"),
             PsmError::SigningError(msg) => write!(f, "Signing error: {msg}"),
             PsmError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
         }
@@ -114,6 +122,18 @@ impl From<String> for PsmError {
 impl From<&str> for PsmError {
     fn from(s: &str) -> Self {
         PsmError::InvalidInput(s.to_string())
+    }
+}
+
+impl From<MidenFalconRpoError> for PsmError {
+    fn from(err: MidenFalconRpoError) -> Self {
+        PsmError::SigningError(err.to_string())
+    }
+}
+
+impl From<miden_keystore::KeyStoreError> for PsmError {
+    fn from(err: miden_keystore::KeyStoreError) -> Self {
+        PsmError::SigningError(err.to_string())
     }
 }
 
@@ -140,15 +160,6 @@ impl From<PsmError> for tonic::Status {
     }
 }
 
-pub type Result<T> = std::result::Result<T, PsmError>;
-
-// Signing-specific errors
-#[derive(Debug)]
-pub enum MidenFalconRpoError {
-    StorageError(String),
-    DecodingError(String),
-}
-
 impl fmt::Display for MidenFalconRpoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -159,12 +170,6 @@ impl fmt::Display for MidenFalconRpoError {
 }
 
 impl std::error::Error for MidenFalconRpoError {}
-
-impl From<MidenFalconRpoError> for PsmError {
-    fn from(err: MidenFalconRpoError) -> Self {
-        PsmError::SigningError(err.to_string())
-    }
-}
 
 impl From<miden_keystore::KeyStoreError> for MidenFalconRpoError {
     fn from(err: miden_keystore::KeyStoreError) -> Self {
@@ -179,11 +184,5 @@ impl From<miden_keystore::KeyStoreError> for MidenFalconRpoError {
                 MidenFalconRpoError::StorageError(msg)
             }
         }
-    }
-}
-
-impl From<miden_keystore::KeyStoreError> for PsmError {
-    fn from(err: miden_keystore::KeyStoreError) -> Self {
-        PsmError::SigningError(err.to_string())
     }
 }
