@@ -1,4 +1,4 @@
-use super::keystore::FilesystemKeyStore;
+use miden_keystore::{FilesystemKeyStore, KeyStore};
 use crate::error::{MidenFalconRpoError, PsmError};
 use crate::storage::DeltaObject;
 use miden_objects::{

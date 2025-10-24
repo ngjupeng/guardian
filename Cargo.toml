@@ -4,6 +4,7 @@ members = [
     "crates/client",
     "crates/server",
     "crates/miden-rpc-client",
+    "crates/miden-keystore",
 ]
 resolver = "2"
 

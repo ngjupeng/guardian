@@ -1,6 +1,15 @@
-pub mod masm;
 pub use private_state_manager_shared::{FromJson, ToJson};
 
-// Re-export commonly used types for convenience
-pub use miden_lib;
-pub use miden_objects;
+mod proto {
+    tonic::include_proto!("state_manager");
+}
+
+pub mod auth;
+mod client;
+mod error;
+pub mod signature;
+
+pub use client::PsmClient;
+pub use error::{ClientError, ClientResult};
+pub use proto::*;
+pub use signature::{verify_commitment_signature, Signer};

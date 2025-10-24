@@ -20,6 +20,12 @@ pub async fn get_delta_since(
     state: &AppState,
     params: GetDeltaSinceParams,
 ) -> Result<GetDeltaSinceResult> {
+    tracing::info!(
+        "Getting delta since: account_id={}, from_nonce={}",
+        params.account_id,
+        params.from_nonce
+    );
+
     let resolved = resolve_account(state, &params.account_id, &params.credentials).await?;
 
     let all_deltas = resolved

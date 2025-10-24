@@ -165,3 +165,25 @@ impl From<MidenFalconRpoError> for PsmError {
         PsmError::SigningError(err.to_string())
     }
 }
+
+impl From<miden_keystore::KeyStoreError> for MidenFalconRpoError {
+    fn from(err: miden_keystore::KeyStoreError) -> Self {
+        match err {
+            miden_keystore::KeyStoreError::StorageError(msg) => {
+                MidenFalconRpoError::StorageError(msg)
+            }
+            miden_keystore::KeyStoreError::DecodingError(msg) => {
+                MidenFalconRpoError::DecodingError(msg)
+            }
+            miden_keystore::KeyStoreError::KeyNotFound(msg) => {
+                MidenFalconRpoError::StorageError(msg)
+            }
+        }
+    }
+}
+
+impl From<miden_keystore::KeyStoreError> for PsmError {
+    fn from(err: miden_keystore::KeyStoreError) -> Self {
+        PsmError::SigningError(err.to_string())
+    }
+}

@@ -1,0 +1,173 @@
+use crate::error::{ClientError, ClientResult};
+use crate::proto::state_manager_client::StateManagerClient;
+use crate::proto::{
+    AuthConfig, ConfigureRequest, ConfigureResponse, GetDeltaRequest, GetDeltaResponse,
+    GetDeltaSinceRequest, GetDeltaSinceResponse, GetStateRequest, GetStateResponse,
+    PushDeltaRequest, PushDeltaResponse,
+};
+use crate::signature::Signer;
+use miden_objects::account::AccountId;
+use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
+
+pub struct PsmClient {
+    client: StateManagerClient<Channel>,
+    signer: Option<Signer>,
+}
+
+impl PsmClient {
+    pub async fn connect(endpoint: impl Into<String>) -> ClientResult<Self> {
+        let endpoint = endpoint.into();
+        let client = StateManagerClient::connect(endpoint).await?;
+        Ok(Self {
+            client,
+            signer: None,
+        })
+    }
+
+    pub fn with_signer(mut self, signer: Signer) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    fn add_auth_metadata(
+        &self,
+        request: &mut tonic::Request<impl std::fmt::Debug>,
+        account_id: &AccountId,
+    ) -> ClientResult<()> {
+        if let Some(signer) = &self.signer {
+            let pubkey_hex = signer.public_key_hex();
+            let signature_hex = signer.sign_account_id(account_id);
+
+            let pubkey_metadata = MetadataValue::try_from(&pubkey_hex)
+                .map_err(|e| ClientError::InvalidResponse(format!("Invalid pubkey: {e}")))?;
+            let signature_metadata = MetadataValue::try_from(&signature_hex)
+                .map_err(|e| ClientError::InvalidResponse(format!("Invalid signature: {e}")))?;
+
+            request.metadata_mut().insert("x-pubkey", pubkey_metadata);
+            request
+                .metadata_mut()
+                .insert("x-signature", signature_metadata);
+        }
+        Ok(())
+    }
+
+    /// Configure a new account
+    ///
+    /// # Arguments
+    /// * `storage_type` - Storage backend type (e.g., "Filesystem")
+    pub async fn configure(
+        &mut self,
+        account_id: &AccountId,
+        auth: AuthConfig,
+        initial_state: impl serde::Serialize,
+        storage_type: impl Into<String>,
+    ) -> ClientResult<ConfigureResponse> {
+        let initial_state_json = serde_json::to_string(&initial_state)?;
+
+        let request = tonic::Request::new(ConfigureRequest {
+            account_id: account_id.to_string(),
+            auth: Some(auth),
+            initial_state: initial_state_json,
+            storage_type: storage_type.into(),
+        });
+
+        let response = self.client.configure(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    pub async fn push_delta(
+        &mut self,
+        account_id: &AccountId,
+        nonce: u64,
+        prev_commitment: impl Into<String>,
+        delta_payload: impl serde::Serialize,
+    ) -> ClientResult<PushDeltaResponse> {
+        let delta_payload_json = serde_json::to_string(&delta_payload)?;
+
+        let mut request = tonic::Request::new(PushDeltaRequest {
+            account_id: account_id.to_string(),
+            nonce,
+            prev_commitment: prev_commitment.into(),
+            delta_payload: delta_payload_json,
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.push_delta(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    pub async fn get_delta(
+        &mut self,
+        account_id: &AccountId,
+        nonce: u64,
+    ) -> ClientResult<GetDeltaResponse> {
+        let mut request = tonic::Request::new(GetDeltaRequest {
+            account_id: account_id.to_string(),
+            nonce,
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.get_delta(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    pub async fn get_delta_since(
+        &mut self,
+        account_id: &AccountId,
+        from_nonce: u64,
+    ) -> ClientResult<GetDeltaSinceResponse> {
+        let mut request = tonic::Request::new(GetDeltaSinceRequest {
+            account_id: account_id.to_string(),
+            from_nonce,
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.get_delta_since(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    pub async fn get_state(&mut self, account_id: &AccountId) -> ClientResult<GetStateResponse> {
+        let mut request = tonic::Request::new(GetStateRequest {
+            account_id: account_id.to_string(),
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.get_state(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+}

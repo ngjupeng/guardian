@@ -16,6 +16,11 @@ pub struct PushDeltaResult {
 }
 
 pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<PushDeltaResult> {
+    tracing::info!(
+        "Pushing delta: account_id={}",
+        params.delta.account_id
+    );
+
     let resolved = resolve_account(state, &params.delta.account_id, &params.credentials).await?;
 
     let current_state = resolved

@@ -3,14 +3,23 @@ name = "private-state-manager-client"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "client-example"
-path = "src/bin/example.rs"
-
 [dependencies]
 private-state-manager-shared = { path = "../shared" }
 miden-objects = "0.11.4"
-miden-lib = "0.11.4"
+serde = "1.0"
 serde_json = "1.0.145"
-miden-processor = "0.16.4"
-miden-vm = "0.16.4"
+tonic = "0.13.0"
+prost = "0.13.4"
+tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
+thiserror = "2.0.9"
+hex = "0.4.3"
+
+[dev-dependencies]
+miden-rpc-client = { path = "../miden-rpc-client" }
+miden-keystore = { path = "../miden-keystore" }
+miden-lib = "0.11.4"
+rand_chacha = "0.9.0"
+tempfile = "3.15.0"
+
+[build-dependencies]
+tonic-build = "0.13.0"
