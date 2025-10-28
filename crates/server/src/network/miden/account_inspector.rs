@@ -15,11 +15,11 @@ impl<'a> MidenAccountInspector<'a> {
     /// Returns None if slot 0 is empty or default
     pub fn extract_slot_0_pubkey(&self) -> Option<String> {
         let slot_0_result = self.account.storage().get_item(0);
-        if let Ok(slot_0_value) = slot_0_result {
-            if slot_0_value != Word::default() {
-                let pubkey_hex = format!("0x{}", hex::encode(slot_0_value.to_bytes()));
-                return Some(pubkey_hex);
-            }
+        if let Ok(slot_0_value) = slot_0_result
+            && slot_0_value != Word::default()
+        {
+            let pubkey_hex = format!("0x{}", hex::encode(slot_0_value.to_bytes()));
+            return Some(pubkey_hex);
         }
         None
     }
@@ -70,10 +70,10 @@ impl<'a> MidenAccountInspector<'a> {
     /// Check if a public key exists in account storage
     /// Returns true if the pubkey is found in either slot 0 or slot 1
     pub fn pubkey_exists(&self, target_pubkey: &str) -> bool {
-        if let Some(slot_0_pubkey) = self.extract_slot_0_pubkey() {
-            if slot_0_pubkey == target_pubkey {
-                return true;
-            }
+        if let Some(slot_0_pubkey) = self.extract_slot_0_pubkey()
+            && slot_0_pubkey == target_pubkey
+        {
+            return true;
         }
 
         let slot_1_pubkeys = self.extract_slot_1_pubkeys();

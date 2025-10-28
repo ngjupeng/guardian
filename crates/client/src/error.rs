@@ -8,7 +8,7 @@ pub enum ClientError {
     Transport(#[from] tonic::transport::Error),
 
     #[error("gRPC status error: {0}")]
-    Status(#[from] tonic::Status),
+    Status(Box<tonic::Status>),
 
     #[error("Server returned error: {0}")]
     ServerError(String),
@@ -18,4 +18,10 @@ pub enum ClientError {
 
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+}
+
+impl From<tonic::Status> for ClientError {
+    fn from(status: tonic::Status) -> Self {
+        ClientError::Status(Box::new(status))
+    }
 }

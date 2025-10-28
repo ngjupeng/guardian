@@ -86,10 +86,10 @@ impl FilesystemService {
             .await
             .map_err(|e| format!("Failed to read directory entry: {e}"))?
         {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".json") {
-                    deltas.push(name.to_string());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.ends_with(".json")
+            {
+                deltas.push(name.to_string());
             }
         }
 
@@ -154,13 +154,13 @@ impl StorageBackend for FilesystemService {
 
         let mut deltas = Vec::new();
         for filename in deltas_filenames {
-            if let Some(nonce_str) = filename.strip_suffix(".json") {
-                if let Ok(nonce) = nonce_str.parse::<u64>() {
-                    // Only include deltas with nonce > from_nonce
-                    if nonce > from_nonce {
-                        let delta = self.pull_delta(account_id, nonce).await?;
-                        deltas.push(delta);
-                    }
+            if let Some(nonce_str) = filename.strip_suffix(".json")
+                && let Ok(nonce) = nonce_str.parse::<u64>()
+            {
+                // Only include deltas with nonce > from_nonce
+                if nonce > from_nonce {
+                    let delta = self.pull_delta(account_id, nonce).await?;
+                    deltas.push(delta);
                 }
             }
         }
