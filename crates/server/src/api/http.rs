@@ -173,3 +173,13 @@ pub async fn get_state(
         ),
     }
 }
+
+#[derive(Serialize)]
+pub struct PubkeyResponse {
+    pub pubkey: String,
+}
+
+pub async fn get_pubkey(State(state): State<AppState>) -> (StatusCode, Json<PubkeyResponse>) {
+    let pubkey = state.ack.pubkey();
+    (StatusCode::OK, Json(PubkeyResponse { pubkey }))
+}

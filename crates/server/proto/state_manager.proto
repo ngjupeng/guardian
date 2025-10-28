@@ -18,6 +18,9 @@ service StateManager {
 
   // Get account state
   rpc GetState(GetStateRequest) returns (GetStateResponse);
+
+  // Get server's public key
+  rpc GetPubkey(GetPubkeyRequest) returns (GetPubkeyResponse);
 }
 
 // Auth configuration - one of the auth types
@@ -116,4 +119,11 @@ message AccountState {
   string commitment = 3;
   string created_at = 4;
   string updated_at = 5;
+}
+
+// Get pubkey request
+message GetPubkeyRequest {}
+
+message GetPubkeyResponse {
+  string pubkey = 1;
 }

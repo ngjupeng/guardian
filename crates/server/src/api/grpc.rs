@@ -206,6 +206,14 @@ impl StateManager for StateManagerService {
             })),
         }
     }
+
+    async fn get_pubkey(
+        &self,
+        _request: Request<GetPubkeyRequest>,
+    ) -> Result<Response<GetPubkeyResponse>, Status> {
+        let pubkey = self.app_state.ack.pubkey();
+        Ok(Response::new(GetPubkeyResponse { pubkey }))
+    }
 }
 
 // Helper functions to convert between internal types and protobuf types
