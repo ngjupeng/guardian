@@ -1,29 +1,25 @@
-mod miden;
+use miden_client::account::component::AccountComponent;
+use miden_client::auth::AuthSecretKey;
+use miden_client::crypto::rpo_falcon512::{PublicKey, SecretKey};
+use miden_client::keystore::FilesystemKeyStore;
+use miden_client::transaction::{InputNotes, OutputNotes, TransactionSummary};
+use miden_client::{Deserializable, Felt, Serializable, Word, ZERO};
+use miden_client::account::{Account, AccountBuilder, AccountDelta, AccountStorageMode, AccountType, StorageMap, StorageSlot};
+use miden_client::asset::{AccountStorageDelta, AccountVaultDelta};
+use miden_client::{account::component::BasicWallet, transaction::TransactionKernel};
+use miden_client::rpc::{Endpoint, GrpcClient, NodeRpcClient};
 
-// miden-client is available for full on-chain submission (see ON_CHAIN_SUBMISSION.md)
-use miden_keystore::{FilesystemKeyStore, KeyStore};
-use miden_lib::account::wallets::BasicWallet;
-use miden_lib::transaction::TransactionKernel;
-use miden_objects::account::{
-    Account, AccountBuilder, AccountComponent, AccountDelta, AccountStorageMode, AccountType,
-    StorageMap, StorageSlot,
-    delta::{AccountStorageDelta, AccountVaultDelta},
-};
+// NamedSource is not exported by miden_client, so we import it from miden_objects (transitive dependency)
 use miden_objects::assembly::diagnostics::NamedSource;
-use miden_objects::crypto::dsa::rpo_falcon512::{PublicKey, SecretKey};
-use miden_objects::transaction::{InputNotes, OutputNotes, TransactionSummary};
-use miden_objects::utils::{Deserializable, Serializable};
-use miden_objects::{Felt, Word, ZERO};
-use miden_rpc_client::MidenRpcClient;
-use private_state_manager_client::{
-    Auth, AuthConfig, ClientResult, FalconRpoSigner, MidenFalconRpoAuth, PsmClient,
-};
+
 use private_state_manager_shared::hex::IntoHex;
 use private_state_manager_shared::ToJson;
+use private_state_manager_client::{Auth, AuthConfig, ClientResult, FalconRpoSigner, MidenFalconRpoAuth, PsmClient, verify_commitment_signature};
 use private_state_manager_client::auth_config::AuthType;
+
+use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tempfile::TempDir;
-use private_state_manager_client::verify_commitment_signature;
 
 // Load Multisig Auth MASM code from file (includes PSM verification)
 const MULTISIG_AUTH: &str = include_str!("../masm/multisig.masm");
@@ -33,25 +29,37 @@ const PSM_LIB: &str = include_str!("../masm/psm.masm");
 fn generate_falcon_keypair(
     keystore: &FilesystemKeyStore<ChaCha20Rng>,
 ) -> (String, String, SecretKey) {
-    let pubkey_commitment_word = keystore
-        .generate_key()
-        .expect("Failed to generate key");
-    let secret_key = keystore
-        .get_key(pubkey_commitment_word)
-        .expect("Failed to get key");
+    // Generate a new secret key
+    let secret_key = SecretKey::new();
+    let auth_secret_key = AuthSecretKey::RpoFalcon512(secret_key.clone());
 
-    // Verify the commitment matches what we'll send later
+    // Add it to the keystore
+    keystore
+        .add_key(&auth_secret_key)
+        .expect("Failed to add key to keystore");
+
+    // Get the public key and commitment
     let actual_pubkey = secret_key.public_key();
     let actual_commitment = actual_pubkey.to_commitment();
+
+    // Verify we can retrieve it
+    let retrieved_key = keystore
+        .get_key(actual_commitment)
+        .expect("Failed to get key")
+        .expect("Key not found in keystore");
+
+    // Verify the retrieved key matches
+    let AuthSecretKey::RpoFalcon512(retrieved_secret) = retrieved_key;
     assert_eq!(
-        pubkey_commitment_word, actual_commitment,
-        "Keystore commitment doesn't match derived public key commitment!"
+        retrieved_secret.public_key().to_commitment(),
+        actual_commitment,
+        "Retrieved key doesn't match!"
     );
 
     // Return both full public key (for auth) and commitment (for account storage)
     use private_state_manager_shared::hex::IntoHex;
     let full_pubkey_hex = (&actual_pubkey).into_hex();
-    let commitment_hex = format!("0x{}", hex::encode(pubkey_commitment_word.to_bytes()));
+    let commitment_hex = format!("0x{}", hex::encode(actual_commitment.to_bytes()));
 
     (full_pubkey_hex, commitment_hex, secret_key)
 }
@@ -62,7 +70,7 @@ fn create_multisig_psm_account(
     client2_pubkey_hex: &str,
     psm_server_pubkey_hex: &str,
     init_seed: [u8; 32],
-) -> miden_objects::account::Account {
+) -> Account {
     // Convert pubkey commitments (Word) from hex to Word
     // The client sends public key commitments (32 bytes), not full keys
     let psm_pubkey_bytes = hex::decode(&psm_server_pubkey_hex[2..])
@@ -121,15 +129,16 @@ fn create_multisig_psm_account(
     );
     let slot_5 = StorageSlot::Map(psm_key_map);
 
-    // Create PSM library with openzeppelin::psm namespace
-    let base_assembler = TransactionKernel::assembler();
-    let psm_library = base_assembler
-        .clone()
-        .assemble_library([NamedSource::new("openzeppelin::psm", PSM_LIB)])
+    // Create PSM library with openzeppelin::psm namespace using NamedSource
+    let psm_source = NamedSource::new("openzeppelin::psm", PSM_LIB);
+
+    // First, compile the PSM library using a fresh assembler
+    let psm_library = TransactionKernel::assembler()
+        .assemble_library([psm_source])
         .expect("Failed to compile PSM library");
 
-    // Add PSM library to assembler for multisig auth compilation
-    let assembler = base_assembler
+    // Then create a new assembler with the PSM library for multisig auth compilation
+    let assembler = TransactionKernel::assembler()
         .with_dynamic_library(psm_library)
         .expect("Failed to add PSM library to assembler");
 
@@ -156,7 +165,8 @@ async fn main() -> ClientResult<()> {
     println!("=== PSM Multi-Client E2E Flow ===\n");
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let keystore = FilesystemKeyStore::<ChaCha20Rng>::new(temp_dir.path().to_path_buf())
+    let rng = ChaCha20Rng::from_seed([42u8; 32]);
+    let keystore = FilesystemKeyStore::with_rng(temp_dir.path().to_path_buf(), rng)
         .expect("Failed to create keystore");
 
     // =========================================================================
@@ -449,36 +459,22 @@ async fn main() -> ClientResult<()> {
                 // =========================================================================
                 println!("Step 8: Connecting to Miden testnet for potential on-chain submission...");
 
-                let client = create_client(&keystore)?;
-
                 // Connect to Miden testnet RPC
-                let miden_node_url = std::env::var("MIDEN_NODE_URL")
-                    .unwrap_or_else(|_| "https://rpc.testnet.miden.io:443".to_string());
-                println!("  Connecting to Miden node: {}", miden_node_url);
+                let miden_endpoint = Endpoint::new(
+                    "https".to_string(),
+                    "rpc.testnet.miden.io".to_string(),
+                    Some(443)
+                );
+                println!("  Connecting to Miden node: {}", miden_endpoint);
 
-                let mut rpc_client = match MidenRpcClient::connect(miden_node_url.clone()).await {
-                    Ok(client) => {
-                        println!("  ✓ Connected to Miden testnet RPC");
-                        client
-                    }
-                    Err(e) => {
-                        println!("  ✗ Failed to connect to Miden node: {}", e);
-                        println!("  Note: PSM validation still succeeded - transaction can be submitted when node is available");
-                        return Ok(());
-                    }
-                };
+                let rpc_client = GrpcClient::new(&miden_endpoint, 10_000);
 
                 // Get latest block info
-                let block_header = match rpc_client.get_block_header(None, false).await {
-                    Ok(response) => {
-                        if let Some(header) = response.block_header {
-                            println!("  ✓ Latest block: #{}", header.block_num);
-                            println!("    Timestamp: {}", header.timestamp);
-                            Some(header)
-                        } else {
-                            println!("  ✗ No block header in response");
-                            None
-                        }
+                let block_header = match rpc_client.get_block_header_by_number(None, false).await {
+                    Ok((header, _mmr_proof)) => {
+                        println!("  ✓ Latest block: #{}", header.block_num());
+                        println!("    Version: {}", header.version());
+                        Some(header)
                     }
                     Err(e) => {
                         println!("  ✗ Failed to get block header: {}", e);

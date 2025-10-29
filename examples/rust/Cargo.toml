@@ -12,12 +12,15 @@ private-state-manager-client = { path = "../../crates/client" }
 private-state-manager-shared = { path = "../../crates/shared" }
 
 # Miden client for transaction execution and proving
-miden-client = { git = "https://github.com/0xMiden/miden-client.git", branch = "next", features = ["tonic"] }
-miden-client-sqlite-store = { git = "https://github.com/0xMiden/miden-client.git", branch = "next", package = "miden-client-sqlite-store" }
+miden-client = { workspace = true, features = ["tonic"] }
+miden-client-sqlite-store = { workspace = true }
+# NamedSource is not exported by miden_client, so we need miden_objects directly
+miden-objects = { workspace = true }
 
-tokio = { version = "1.42", features = ["full"] }
-hex = "0.4"
-tempfile = "3.15"
-rand_chacha = "0.9"
-base64 = "0.22"
-serde_json = "1.0"
+tokio = { workspace = true, features = ["full"] }
+hex = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
