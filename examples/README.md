@@ -10,17 +10,7 @@ Command-line client demonstrating PSM integration in Rust.
 **Run:**
 ```bash
 cd rust
-cargo run --example e2e
-```
-
-### [Web Example](./web/)
-Browser-based client using TypeScript and the Miden SDK.
-
-**Run:**
-```bash
-cd web
-npm install
-npm run dev
+cargo run --bin main
 ```
 
 NOTE: Before running any example, you need to start the PSM server.
