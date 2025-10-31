@@ -211,7 +211,7 @@ fn build_update_signers_script() -> Result<TransactionScript, MultisigError> {
     exec.multisig::update_signers_and_threshold
     end";
 
-    let program = assembler.assemble_program(code).map_err(|err| {
+    let program = assembler.with_debug_mode(true).assemble_program(code).map_err(|err| {
         MultisigError::Assembly(format!("Failed to compile update-signers script: {err}"))
     })?;
 

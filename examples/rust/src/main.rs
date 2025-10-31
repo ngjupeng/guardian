@@ -454,7 +454,7 @@ async fn main() -> ClientResult<()> {
                         result
                     }
                     Err(e) => {
-                        println!("  ✗ Transaction execution failed: {}", e);
+                        println!("  ✗ Transaction execution failed: {:?}", e);
                         return Ok(());
                     }
                 };
