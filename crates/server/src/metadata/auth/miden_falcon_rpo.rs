@@ -3,11 +3,6 @@ use miden_objects::crypto::dsa::rpo_falcon512::{PublicKey, Signature};
 use miden_objects::crypto::hash::rpo::Rpo256;
 use miden_objects::utils::Deserializable;
 use miden_objects::{Felt, FieldElement, Word};
-use crate::network::miden::account_inspector::MidenAccountInspector;
-use miden_objects::account::Account;
-use miden_objects::utils::Serializable;
-use private_state_manager_shared::FromJson;
-use std::collections::HashSet;
 
 /// Verify a Falcon RPO signature for a request
 ///
@@ -80,61 +75,6 @@ fn parse_signature(hex_str: &str) -> Result<Signature, String> {
     let hex_str = hex_str.trim_start_matches("0x");
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid signature hex: {e}"))?;
     Signature::read_from_bytes(&bytes).map_err(|e| format!("Failed to deserialize signature: {e}"))
-}
-
-/// Validate that provided public keys match the commitments stored in the account's storage slot 1
-///
-/// # Arguments
-/// * `pubkeys` - List of public key hex strings
-/// * `state_json` - The account state JSON
-pub fn validate_pubkeys_match_storage(
-    pubkeys: &[String],
-    state_json: &serde_json::Value,
-) -> Result<(), String> {
-    let account = Account::from_json(state_json)
-        .map_err(|e| format!("Failed to parse account: {e}"))?;
-
-    let inspector = MidenAccountInspector::new(&account);
-    let storage_commitments: HashSet<String> =
-        inspector.extract_slot_1_pubkeys().into_iter().collect();
-
-    let mut provided_commitments = HashSet::new();
-    for pubkey_hex in pubkeys {
-        let pubkey = parse_public_key(pubkey_hex)?;
-        let commitment = pubkey.to_commitment();
-        let commitment_hex = format!("0x{}", hex::encode(commitment.to_bytes()));
-        provided_commitments.insert(commitment_hex);
-    }
-
-    if storage_commitments != provided_commitments {
-        let missing_in_storage: Vec<_> = provided_commitments
-            .difference(&storage_commitments)
-            .collect();
-        let missing_in_provided: Vec<_> = storage_commitments
-            .difference(&provided_commitments)
-            .collect();
-
-        let mut error_msg =
-            "Public key commitments mismatch with account storage".to_string();
-
-        if !missing_in_storage.is_empty() {
-            error_msg.push_str(&format!(
-                "\n  Commitments in provided pubkeys but not in storage: {:?}",
-                missing_in_storage
-            ));
-        }
-
-        if !missing_in_provided.is_empty() {
-            error_msg.push_str(&format!(
-                "\n  Commitments in storage but not in provided pubkeys: {:?}",
-                missing_in_provided
-            ));
-        }
-
-        return Err(error_msg);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

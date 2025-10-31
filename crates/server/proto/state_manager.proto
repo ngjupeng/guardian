@@ -7,9 +7,6 @@ service StateManager {
   // Configure a new account
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
 
-  // Configure authentication for an existing account
-  rpc ConfigureAuth(ConfigureAuthRequest) returns (ConfigureAuthResponse);
-
   // Submit a delta
   rpc PushDelta(PushDeltaRequest) returns (PushDeltaResponse);
 
@@ -50,17 +47,6 @@ message ConfigureResponse {
   bool success = 1;
   string message = 2;
   string ack_pubkey = 3;
-}
-
-// Configure auth request
-message ConfigureAuthRequest {
-  string account_id = 1;
-  AuthConfig auth = 2;
-}
-
-message ConfigureAuthResponse {
-  bool success = 1;
-  string message = 2;
 }
 
 // Push delta request

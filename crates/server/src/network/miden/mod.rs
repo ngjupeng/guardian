@@ -218,12 +218,22 @@ impl NetworkClient for MidenNetworkClient {
         }
     }
 
-    fn validate_auth_config(
-        &self,
+    async fn should_update_auth(
+        &mut self,
         state_json: &serde_json::Value,
-        auth: &Auth,
-    ) -> Result<(), String> {
-        auth.validate_storage(state_json)
+    ) -> Result<Option<Auth>, String> {
+        let account = Account::from_json(state_json)?;
+        let inspector = MidenAccountInspector::new(&account);
+
+        let pubkeys = inspector.extract_slot_1_pubkeys();
+
+        if pubkeys.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Auth::MidenFalconRpo {
+                cosigner_pubkeys: pubkeys,
+            }))
+        }
     }
 }
 

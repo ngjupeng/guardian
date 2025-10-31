@@ -1,8 +1,8 @@
 use crate::delta_object::DeltaObject;
 use crate::metadata::auth::{Auth, AuthHeader, Credentials};
 use crate::services::{
-    self, ConfigureAccountParams, ConfigureAuthParams, GetDeltaParams, GetDeltaSinceParams,
-    GetStateParams, PushDeltaParams,
+    self, ConfigureAccountParams, GetDeltaParams, GetDeltaSinceParams, GetStateParams,
+    PushDeltaParams,
 };
 use crate::state::AppState;
 use crate::state_object::StateObject;
@@ -25,23 +25,6 @@ impl From<ConfigureRequest> for ConfigureAccountParams {
             auth: req.auth,
             initial_state: req.initial_state,
             storage_type: req.storage_type,
-            // Credential will be set from AuthHeader
-            credential: Credentials::signature(String::new(), String::new()),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-pub struct ConfigureAuthRequest {
-    pub account_id: String,
-    pub auth: Auth,
-}
-
-impl From<ConfigureAuthRequest> for ConfigureAuthParams {
-    fn from(req: ConfigureAuthRequest) -> Self {
-        Self {
-            account_id: req.account_id,
-            auth: req.auth,
             // Credential will be set from AuthHeader
             credential: Credentials::signature(String::new(), String::new()),
         }
@@ -88,37 +71,6 @@ pub async fn configure(
                 success: true,
                 message: format!("Account '{}' configured successfully", response.account_id),
                 ack_pubkey: Some(response.ack_pubkey),
-            }),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(ConfigureResponse {
-                success: false,
-                message: e.to_string(),
-                ack_pubkey: None,
-            }),
-        ),
-    }
-}
-
-pub async fn configure_auth(
-    State(state): State<AppState>,
-    AuthHeader(credentials): AuthHeader,
-    Json(payload): Json<ConfigureAuthRequest>,
-) -> (StatusCode, Json<ConfigureResponse>) {
-    let mut params = ConfigureAuthParams::from(payload);
-    params.credential = credentials;
-
-    match services::configure_auth(&state, params).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(ConfigureResponse {
-                success: true,
-                message: format!(
-                    "Auth configuration updated successfully for account '{}'",
-                    response.account_id
-                ),
-                ack_pubkey: None,
             }),
         ),
         Err(e) => (

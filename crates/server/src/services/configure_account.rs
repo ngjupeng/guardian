@@ -27,11 +27,10 @@ pub async fn configure_account(
 ) -> Result<ConfigureAccountResult> {
     tracing::info!("Configuring account: {}", params.account_id);
 
-    let existing = state
-        .metadata
-        .get(&params.account_id)
-        .await
-        .map_err(|e| PsmError::StorageError(format!("Failed to check existing account: {e}")))?;
+    let existing =
+        state.metadata.get(&params.account_id).await.map_err(|e| {
+            PsmError::StorageError(format!("Failed to check existing account: {e}"))
+        })?;
 
     if existing.is_some() {
         return Err(PsmError::AccountAlreadyExists(params.account_id.clone()));

@@ -1,8 +1,7 @@
 use crate::delta_object::DeltaObject;
 use crate::metadata::auth::{Auth, ExtractCredentials};
 use crate::services::{
-    self, ConfigureAccountParams, ConfigureAuthParams, GetDeltaParams, GetStateParams,
-    PushDeltaParams,
+    self, ConfigureAccountParams, GetDeltaParams, GetStateParams, PushDeltaParams,
 };
 use crate::state::AppState;
 use crate::storage::StorageType;
@@ -70,42 +69,6 @@ impl StateManager for StateManagerService {
                 success: false,
                 message: e.to_string(),
                 ack_pubkey: String::new(),
-            })),
-        }
-    }
-
-    async fn configure_auth(
-        &self,
-        request: Request<ConfigureAuthRequest>,
-    ) -> Result<Response<ConfigureAuthResponse>, Status> {
-        let credential = request.metadata().extract_credentials()?;
-
-        let req = request.into_inner();
-
-        let auth_config = req
-            .auth
-            .ok_or_else(|| Status::invalid_argument("Missing auth configuration"))?;
-
-        let auth = Auth::try_from(auth_config)
-            .map_err(|e| Status::invalid_argument(format!("Invalid auth config: {e}")))?;
-
-        let params = ConfigureAuthParams {
-            account_id: req.account_id.clone(),
-            auth,
-            credential,
-        };
-
-        match services::configure_auth(&self.app_state, params).await {
-            Ok(response) => Ok(Response::new(ConfigureAuthResponse {
-                success: true,
-                message: format!(
-                    "Auth configuration updated successfully for account '{}'",
-                    response.account_id
-                ),
-            })),
-            Err(e) => Ok(Response::new(ConfigureAuthResponse {
-                success: false,
-                message: e.to_string(),
             })),
         }
     }

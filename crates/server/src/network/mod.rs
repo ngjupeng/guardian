@@ -51,12 +51,11 @@ pub trait NetworkClient: Send + Sync {
         credential: &Credentials,
     ) -> Result<(), String>;
 
-    /// Validate that the auth configuration matches the on-chain account state
-    fn validate_auth_config(
-        &self,
+    /// Determine if account auth should be updated given the state
+    async fn should_update_auth(
+        &mut self,
         state_json: &serde_json::Value,
-        auth: &Auth,
-    ) -> Result<(), String>;
+    ) -> Result<Option<Auth>, String>;
 }
 
 /// Network type

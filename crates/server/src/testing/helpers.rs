@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::ack::{Acknowledger, MidenFalconRpoSigner};
 use crate::api::grpc::StateManagerService;
+use crate::metadata::auth::Auth;
 use crate::metadata::filesystem::FilesystemMetadataStore;
 use crate::network::{NetworkClient, NetworkType};
 use crate::state::AppState;
@@ -123,12 +124,11 @@ impl NetworkClient for IntegrationMockNetworkClient {
             .validate_credential(state_json, credential)
     }
 
-    fn validate_auth_config(
-        &self,
+    async fn should_update_auth(
+        &mut self,
         state_json: &serde_json::Value,
-        auth: &crate::metadata::auth::Auth,
-    ) -> Result<(), String> {
-        self.miden_client.validate_auth_config(state_json, auth)
+    ) -> Result<Option<Auth>, String> {
+        self.miden_client.should_update_auth(state_json).await
     }
 }
 
