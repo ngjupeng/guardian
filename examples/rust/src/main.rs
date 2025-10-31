@@ -1,13 +1,13 @@
 mod falcon;
-mod miden_helpers;
 mod multisig;
 
-use miden_helpers::{add_account_and_sync, commitment_from_hex, create_miden_client};
+use miden_client::testing::MockChainBuilder;
+use miden_client::transaction::TransactionExecutorError;
 use miden_client::account::Account;
 use miden_client::crypto::rpo_falcon512::PublicKey;
 use miden_client::keystore::FilesystemKeyStore;
-use miden_client::rpc::Endpoint;
 use miden_client::{Deserializable, Felt, Serializable, Word};
+use miden_client::vm::{AdviceInputs, AdviceMap};
 
 
 use miden_objects::account::Signature as AccountSignature;
@@ -25,6 +25,16 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tempfile::TempDir;
 
+/// Converts a hex-encoded public key commitment (with or without 0x prefix) into a `Word`.
+pub fn commitment_from_hex(hex_commitment: &str) -> Result<Word, String> {
+    let trimmed = hex_commitment.strip_prefix("0x").unwrap_or(hex_commitment);
+    let bytes = hex::decode(trimmed)
+        .map_err(|err| format!("Failed to decode commitment hex '{hex_commitment}': {err}"))?;
+
+    Word::read_from_bytes(&bytes)
+        .map_err(|err| format!("Failed to deserialize commitment word '{hex_commitment}': {err}"))
+}
+
 #[tokio::main]
 async fn main() -> ClientResult<()> {
     println!("=== PSM Multi-Client E2E Flow ===\n");
@@ -34,9 +44,6 @@ async fn main() -> ClientResult<()> {
     let keystore = FilesystemKeyStore::with_rng(temp_dir.path().to_path_buf(), rng)
         .expect("Failed to create keystore");
 
-    // =========================================================================
-    // Setup: Generate keys for both clients
-    // =========================================================================
     println!("Setup: Generating keys...");
 
     let (client1_full_pubkey_hex, client1_commitment_hex, client1_secret_key) =
@@ -48,9 +55,6 @@ async fn main() -> ClientResult<()> {
     println!("  ✓ Client 2 commitment: {}...", &client2_commitment_hex);
     println!();
 
-    // =========================================================================
-    // Step 1: Connect to PSM and get server's public key
-    // =========================================================================
     println!("Step 1: Connect to PSM and get server's public key...");
 
     let client1_signer = FalconRpoSigner::new(client1_secret_key.clone());
@@ -77,9 +81,6 @@ async fn main() -> ClientResult<()> {
         }
     };
 
-    // Compute the commitment from the server's full public key
-    // The server returns the full key for signature verification, but we need
-    // to store only the commitment in the account
     let server_pubkey_bytes =
         hex::decode(&server_ack_pubkey[2..]).expect("Failed to decode server public key");
     let server_pubkey = PublicKey::read_from_bytes(&server_pubkey_bytes)
@@ -90,10 +91,7 @@ async fn main() -> ClientResult<()> {
     println!("  ✓ Server commitment: {}...", &server_commitment_hex);
     println!();
 
-    // =========================================================================
-    // Step 2: Create multisig PSM account with server's pubkey commitment
-    // =========================================================================
-    println!("Step 2: Creating multisig PSM account with PSM auth...");
+    println!("Step 2: Creating multisig PSM account...");
 
     let init_seed = [0xff; 32];
     let account = multisig::create_multisig_psm_account(
@@ -105,21 +103,11 @@ async fn main() -> ClientResult<()> {
 
     let account_id = account.id();
     println!("  ✓ Account ID: {}", account_id);
-    println!(
-        "  ✓ Commitment: 0x{}",
-        hex::encode(account.commitment().as_bytes())
-    );
-    println!("  ✓ Multisig: 2-of-2 (client1, client2)");
-    println!("  ✓ PSM auth enabled with server's pubkey");
+    println!("  ✓ Multisig: 2-of-2 with PSM");
     println!();
 
-    // =========================================================================
-    // Step 3: Client 1 - Configure account in PSM
-    // =========================================================================
     println!("Step 3: Client 1 - Configure account in PSM...");
 
-    // Configure with both cosigners (use full public keys for auth, not commitments)
-    // The server needs full keys to verify signatures
     let auth_config = AuthConfig {
         auth_type: Some(AuthType::MidenFalconRpo(MidenFalconRpoAuth {
             cosigner_pubkeys: vec![
@@ -129,7 +117,6 @@ async fn main() -> ClientResult<()> {
         })),
     };
 
-    // Create state with serialized account
     let account_bytes = account.to_bytes();
     let account_base64 =
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &account_bytes);
@@ -153,12 +140,8 @@ async fn main() -> ClientResult<()> {
     };
     println!();
 
-    // =========================================================================
-    // Step 4: Client 2 - Pull state from PSM
-    // =========================================================================
     println!("Step 4: Client 2 - Pull state from PSM...");
 
-    // Client 2 connects with their key
     let client2_signer = FalconRpoSigner::new(client2_secret_key.clone());
     let client2_auth = Auth::FalconRpoSigner(client2_signer);
 
@@ -171,13 +154,9 @@ async fn main() -> ClientResult<()> {
         Ok(response) => {
             println!("  ✓ {}", response.message);
             if let Some(state) = response.state {
-                println!("    Commitment: {}", state.commitment);
-                println!("    Updated at: {}", state.updated_at);
-
                 let state_value: serde_json::Value =
                     serde_json::from_str(&state.state_json).expect("Failed to parse state_json");
 
-                // Deserialize account
                 if let Some(data_str) = state_value["data"].as_str() {
                     let bytes = base64::Engine::decode(
                         &base64::engine::general_purpose::STANDARD,
@@ -185,12 +164,9 @@ async fn main() -> ClientResult<()> {
                     )
                     .expect("Failed to decode account data");
                     match Account::read_from_bytes(&bytes) {
-                        Ok(account) => {
-                            println!("    ✓ Deserialized account");
-                            Some(account)
-                        }
+                        Ok(account) => Some(account),
                         Err(e) => {
-                            println!("    ✗ Failed to deserialize: {}", e);
+                            println!("  ✗ Failed to deserialize: {}", e);
                             None
                         }
                     }
@@ -208,27 +184,10 @@ async fn main() -> ClientResult<()> {
     };
     println!();
 
-    // =========================================================================
-    // Step 5: Client 2 - Create TransactionSummary
-    // =========================================================================
     if let Some(account) = retrieved_account {
-        println!("Step 5: Client 2 - Create TransactionSummary for 3-of-3 + new cosigner...");
-        println!("  ✓ Account retrieved from PSM");
-        println!("    Account ID: {}", account.id());
-        println!("    Current nonce: {}", account.nonce());
-
-
-
-        // Generate a new cosigner keypair
-        println!("  Generating new cosigner keypair...");
+        println!("Step 5: Client 2 - Simulate transaction (update to 3-of-3)...");
         let (_new_cosigner_full_pubkey_hex, new_cosigner_commitment_hex, _new_cosigner_secret_key) =
             falcon::generate_falcon_keypair(&keystore);
-        println!(
-            "  ✓ New cosigner commitment: {}...",
-            &new_cosigner_commitment_hex
-        );
-
-        println!("  Preparing multisig update payload (3-of-3 with new cosigner)...");
 
         let signer_commitments = match [&client1_commitment_hex, &client2_commitment_hex, &new_cosigner_commitment_hex]
             .into_iter()
@@ -249,76 +208,71 @@ async fn main() -> ClientResult<()> {
             Felt::new(0),
         ]);
 
-        let (simulation_request, config_hash) = match multisig::build_update_signers_transaction_request(
-            3,
-            &signer_commitments,
-            salt,
-            std::iter::empty::<(Word, Vec<Felt>)>(),
-        ) {
-            Ok(result) => result,
+        let (config_hash, config_values) = multisig::build_multisig_config_advice(3, &signer_commitments);
+
+        let tx_script = match multisig::build_update_signers_script() {
+            Ok(script) => script,
             Err(err) => {
-                println!("  ✗ Failed to build simulation request: {}", err);
+                println!("  ✗ Failed to build transaction script: {}", err);
                 return Ok(());
             }
         };
 
-        println!(
-            "  ✓ Auth SALT: 0x{}",
-            hex::encode(salt.to_bytes())
-        );
-        println!(
-            "  ✓ Multisig config hash: 0x{}",
-            hex::encode(config_hash.to_bytes())
-        );
-
-        println!("  Setting up local Miden client for simulation...");
-        let local_endpoint = Endpoint::new("http".to_string(), "127.0.0.1".to_string(), Some(57291));
-        let mut sim_client = match create_miden_client(temp_dir.path(), &local_endpoint).await {
-            Ok(client) => client,
+        let mock_chain = match MockChainBuilder::with_accounts([account.clone()]) {
+            Ok(builder) => builder.build().unwrap(),
             Err(err) => {
-                println!("  ✗ Failed to create Miden client: {}", err);
-                println!(
-                    "    Hint: ensure a local node is running at {}",
-                    local_endpoint
-                );
+                println!("  ✗ Failed to create MockChain: {}", err);
                 return Ok(());
             }
         };
 
-        if let Err(err) = add_account_and_sync(&mut sim_client, &account).await {
-            println!("  ✗ Failed to add or sync account in Miden client: {}", err);
-            return Ok(());
-        }
+        let mut advice_map = AdviceMap::default();
+        advice_map.insert(config_hash, config_values.clone());
+        let advice_inputs = AdviceInputs {
+            map: advice_map,
+            ..Default::default()
+        };
 
-        println!("  Executing dry-run transaction (expect Unauthorized)...");
-        let tx_summary = match multisig::execute_transaction_for_summary(
-            &mut sim_client,
-            account.id(),
-            simulation_request,
-        )
-        .await
+        let tx_context_init = match mock_chain
+            .build_tx_context(account.id(), &[], &[])
         {
-            Ok(summary) => summary,
+            Ok(builder) => match builder
+                .tx_script(tx_script.clone())
+                .tx_script_args(config_hash)
+                .extend_advice_inputs(advice_inputs.clone())
+                .auth_args(salt)
+                .build()
+            {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    println!("  ✗ Failed to build transaction context: {}", err);
+                    return Ok(());
+                }
+            },
             Err(err) => {
-                println!("  ✗ Simulation failed: {}", err);
+                println!("  ✗ Failed to create transaction context: {}", err);
                 return Ok(());
             }
         };
 
-        println!(
-            "  ✓ TX summary commitment: 0x{}",
-            hex::encode(tx_summary.to_commitment().to_bytes())
-        );
+        let tx_summary = match tx_context_init.execute().await {
+            Err(TransactionExecutorError::Unauthorized(tx_effects)) => {
+                println!("  ✓ Transaction summary created");
+                tx_effects
+            }
+            Ok(_) => {
+                println!("  ✗ Expected Unauthorized error but transaction succeeded");
+                return Ok(());
+            }
+            Err(err) => {
+                println!("  ✗ Simulation failed: {:?}", err);
+                return Ok(());
+            }
+        };
         println!();
 
-        // =========================================================================
-        // Step 6: Client 2 - Push TransactionSummary to PSM; server signs TX summary commitment
-        // =========================================================================
-        println!(
-            "Step 6: Push TransactionSummary; expect ack signature over TX_SUMMARY_COMMITMENT..."
-        );
+        println!("Step 6: Push transaction summary to PSM...");
 
-        // Serialize TransactionSummary to JSON using the expected format
         let tx_summary_json = tx_summary.to_json();
         let prev_commitment = format!("0x{}", hex::encode(account.commitment().as_bytes()));
 
@@ -333,22 +287,16 @@ async fn main() -> ClientResult<()> {
         {
             Ok(response) => {
                 println!("  ✓ {}", response.message);
-                // ack_sig can be at top level or in delta
                 let ack_sig = response
                     .ack_sig
                     .or_else(|| response.delta.as_ref().map(|d| d.ack_sig.clone()))
                     .unwrap_or_default();
 
                 if let Some(delta) = response.delta {
-                    println!("    New commitment: {}", delta.new_commitment);
                     if !ack_sig.is_empty() {
-                        println!(
-                            "    PSM ack signature: {}...",
-                            &ack_sig[0..20.min(ack_sig.len())]
-                        );
                         (delta.new_commitment, ack_sig)
                     } else {
-                        println!("  ✗ Missing ack signature in response");
+                        println!("  ✗ Missing ack signature");
                         return Ok(());
                     }
                 } else {
@@ -357,40 +305,22 @@ async fn main() -> ClientResult<()> {
                 }
             }
             Err(e) => {
-                println!("  ✗ Failed to push TransactionSummary: {}", e);
+                println!("  ✗ Push failed: {}", e);
                 return Ok(());
             }
         };
         println!();
 
-        // =========================================================================
-        // Step 7: Verify PSM ack signature over the TX summary commitment; update local account
-        // =========================================================================
-        println!("Step 7: Verify PSM ack over TX summary commitment...");
+        println!("Step 7: Execute transaction with signatures...");
 
-        // Compute TX summary commitment hex for verification
         let tx_summary_commitment_hex =
             format!("0x{}", hex::encode(tx_summary.to_commitment().to_bytes()));
 
-        // Ensure the ack_sig has 0x prefix for verify_commitment_signature
         let ack_sig_with_prefix = if ack_sig.starts_with("0x") {
             ack_sig.clone()
         } else {
             format!("0x{}", ack_sig)
         };
-
-        println!(
-            "  Debug: TX commitment for verification: {}",
-            &tx_summary_commitment_hex
-        );
-        println!(
-            "  Debug: Server pubkey: {}...",
-            &server_ack_pubkey[..40.min(server_ack_pubkey.len())]
-        );
-        println!(
-            "  Debug: ACK signature: {}...",
-            &ack_sig_with_prefix[..40.min(ack_sig_with_prefix.len())]
-        );
 
         match verify_commitment_signature(
             &tx_summary_commitment_hex,
@@ -398,8 +328,6 @@ async fn main() -> ClientResult<()> {
             &ack_sig_with_prefix,
         ) {
             Ok(true) => {
-                println!("  ✓ PSM signature VALID over TX summary commitment");
-
                 let tx_message = tx_summary.to_commitment();
 
                 let ack_signature = match RawFalconSignature::from_hex(&ack_sig_with_prefix) {
@@ -430,63 +358,58 @@ async fn main() -> ClientResult<()> {
                     &cosigner2_signature,
                 ));
 
-                println!("Step 8: Building final transaction request with signatures...");
-                let (final_request, _) = match multisig::build_update_signers_transaction_request(
-                    3,
-                    &signer_commitments,
-                    salt,
-                    signature_advice,
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        println!("  ✗ Failed to build final transaction request: {}", err);
-                        return Ok(());
-                    }
-                };
-
-                println!("  Executing transaction with signatures...");
-                let tx_result = match sim_client
-                    .new_transaction(account.id(), final_request)
-                    .await
-                {
-                    Ok(result) => {
-                        println!("  ✓ Transaction executed successfully");
-                        result
-                    }
-                    Err(e) => {
-                        println!("  ✗ Transaction execution failed: {:?}", e);
-                        return Ok(());
-                    }
-                };
-
-                let executed_tx = tx_result.executed_transaction();
-                let final_commitment = executed_tx.final_account().commitment();
-                let nonce_delta = executed_tx.account_delta().nonce_delta();
-
-                println!("  Submitting transaction to the node...");
-                if let Err(e) = sim_client.submit_transaction(tx_result).await {
-                    println!("  ✗ Failed to submit transaction: {}", e);
-                    return Ok(());
+                let mut final_advice_map = AdviceMap::default();
+                final_advice_map.insert(config_hash, config_values);
+                for (key, value) in signature_advice {
+                    final_advice_map.insert(key, value);
                 }
+                let final_advice_inputs = AdviceInputs {
+                    map: final_advice_map,
+                    ..Default::default()
+                };
 
-                println!("  ✓ Transaction submitted");
-                println!(
-                    "    Final account commitment: 0x{}",
-                    hex::encode(final_commitment.as_bytes())
-                );
-                println!("    Nonce delta: {}", nonce_delta.as_int());
+                let tx_result = match mock_chain
+                    .build_tx_context(account.id(), &[], &[])
+                {
+                    Ok(builder) => match builder
+                        .tx_script(tx_script)
+                        .tx_script_args(config_hash)
+                        .add_signature(server_commitment.into(), tx_message, ack_signature)
+                        .add_signature(signer_commitments[0].into(), tx_message, cosigner1_signature)
+                        .add_signature(signer_commitments[1].into(), tx_message, cosigner2_signature)
+                        .extend_advice_inputs(final_advice_inputs)
+                        .auth_args(salt)
+                        .build()
+                    {
+                        Ok(ctx) => match ctx.execute().await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                println!("  ✗ Execution failed: {:?}", e);
+                                return Ok(());
+                            }
+                        },
+                        Err(err) => {
+                            println!("  ✗ Build failed: {}", err);
+                            return Ok(());
+                        }
+                    },
+                    Err(err) => {
+                        println!("  ✗ Context creation failed: {}", err);
+                        return Ok(());
+                    }
+                };
+
+                println!("  ✓ Transaction executed (nonce: {})", tx_result.account_delta().nonce_delta().as_int());
             }
             Ok(false) => {
-                println!("  ✗ PSM signature INVALID");
+                println!("  ✗ Invalid PSM signature");
             }
             Err(e) => {
-                println!("  ✗ Signature verification error: {}", e);
+                println!("  ✗ Verification error: {}", e);
             }
         }
-    } else {
-        println!("  ✗ Failed to retrieve account from PSM");
     }
 
-    println!("\n=== Multi-client E2E flow completed! ===");
+    println!("\n=== Flow completed ===");
     Ok(())
 }

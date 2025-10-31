@@ -116,6 +116,9 @@ name = "anyhow"
 version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+dependencies = [
+ "backtrace",
+]
 
 [[package]]
 name = "arrayref"
@@ -1628,6 +1631,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-block-prover"
+version = "0.12.0"
+source = "git+https://github.com/0xMiden/miden-base.git?branch=next#a9177f92928c5aa3208531796424d1a22c307a1a"
+dependencies = [
+ "miden-lib",
+ "miden-objects",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "miden-client"
 version = "0.12.0"
 source = "git+https://github.com/0xMiden/miden-client.git?branch=next#949ac868dd42c94b129e9edef32d369315a33938"
@@ -1643,6 +1656,7 @@ dependencies = [
  "miden-note-transport-proto-build",
  "miden-objects",
  "miden-remote-prover-client",
+ "miden-testing",
  "miden-tx",
  "miette",
  "prost",
@@ -1656,6 +1670,7 @@ dependencies = [
  "tonic-health",
  "tonic-web-wasm-client",
  "tracing",
+ "uuid",
  "web-sys",
 ]
 
@@ -1774,6 +1789,7 @@ dependencies = [
  "miden-objects",
  "miden-processor",
  "miden-stdlib",
+ "rand 0.9.2",
  "regex",
  "thiserror 2.0.17",
  "walkdir",
@@ -1951,6 +1967,7 @@ dependencies = [
  "miden-utils-diagnostics",
  "paste",
  "thiserror 2.0.17",
+ "tokio",
  "tracing",
  "winter-prover",
 ]
@@ -2017,6 +2034,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-testing"
+version = "0.12.0"
+source = "git+https://github.com/0xMiden/miden-base.git?branch=next#a9177f92928c5aa3208531796424d1a22c307a1a"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "miden-block-prover",
+ "miden-lib",
+ "miden-objects",
+ "miden-processor",
+ "miden-tx",
+ "miden-tx-batch-prover",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
+ "thiserror 2.0.17",
+ "winterfell",
+]
+
+[[package]]
 name = "miden-tx"
 version = "0.12.0"
 source = "git+https://github.com/0xMiden/miden-base.git?branch=next#1161c377b4c15c73b6cce4279284fb6ba1b66407"
@@ -2029,6 +2065,15 @@ dependencies = [
  "rand 0.9.2",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "miden-tx-batch-prover"
+version = "0.12.0"
+source = "git+https://github.com/0xMiden/miden-base.git?branch=next#a9177f92928c5aa3208531796424d1a22c307a1a"
+dependencies = [
+ "miden-objects",
+ "miden-tx",
 ]
 
 [[package]]
@@ -4113,6 +4158,7 @@ checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
+ "serde",
  "wasm-bindgen",
 ]
 
@@ -4756,6 +4802,17 @@ dependencies = [
  "winter-fri",
  "winter-math",
  "winter-utils",
+]
+
+[[package]]
+name = "winterfell"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43f824ddd5aec8ca6a54307f20c115485a8a919ea94dd26d496d856ca6185f4f"
+dependencies = [
+ "winter-air",
+ "winter-prover",
+ "winter-verifier",
 ]
 
 [[package]]

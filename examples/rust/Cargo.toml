@@ -12,7 +12,7 @@ private-state-manager-client = { path = "../../crates/client" }
 private-state-manager-shared = { path = "../../crates/shared" }
 
 # Miden client for transaction execution and proving
-miden-client = { workspace = true, features = ["tonic"] }
+miden-client = { workspace = true, features = ["tonic", "testing"] }
 miden-client-sqlite-store = { workspace = true }
 # NamedSource is not exported by miden_client, so we need miden_objects directly
 miden-objects = { workspace = true }

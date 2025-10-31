@@ -8,16 +8,15 @@ use miden_client::transaction::{
     TransactionAuthenticator, TransactionExecutorError, TransactionKernel, TransactionRequest,
     TransactionRequestBuilder, TransactionRequestError, TransactionScript, TransactionSummary,
 };
-use miden_client::{Client, ClientError, Deserializable, Word};
+use miden_client::{Client, ClientError, Deserializable, ScriptBuilder, Word};
 
 // NamedSource is not exported by miden_client, so we import it from miden_objects (transitive dependency)
 use miden_objects::account::{AccountId, Signature};
 use miden_objects::assembly::diagnostics::NamedSource;
 use miden_objects::{Felt, Hasher};
 
-// Load Multisig Auth MASM code from file (includes PSM verification)
-const MULTISIG_AUTH: &str = include_str!("../masm/multisig.masm");
-const PSM_LIB: &str = include_str!("../masm/psm.masm");
+// Load Multisig+PSM Auth MASM code from consolidated file
+const MULTISIG_PSM_AUTH: &str = include_str!("../masm/multisig-psm.masm");
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -131,31 +130,20 @@ pub fn create_multisig_psm_account(
     );
     let slot_5 = StorageSlot::Map(psm_key_map);
 
-    // Create PSM library with openzeppelin::psm namespace using NamedSource
-    let psm_source = NamedSource::new("openzeppelin::psm", PSM_LIB);
-
-    // First, compile the PSM library using a fresh assembler
-    let psm_library = TransactionKernel::assembler()
-        .assemble_library([psm_source])
-        .expect("Failed to compile PSM library");
-
-    // Then create a new assembler with the PSM library for multisig auth compilation
-    let assembler = TransactionKernel::assembler()
-        .with_dynamic_library(psm_library)
-        .expect("Failed to add PSM library to assembler");
-
+    // Compile the consolidated multisig+PSM auth component
+    // All PSM logic is now embedded in the same MASM file
     let auth_component = AccountComponent::compile(
-        MULTISIG_AUTH.to_string(),
-        assembler,
+        MULTISIG_PSM_AUTH.to_string(),
+        TransactionKernel::assembler(),
         vec![slot_0, slot_1, slot_2, slot_3, slot_4, slot_5],
     )
-    .expect("Failed to compile auth component")
+    .expect("Failed to compile multisig+PSM auth component")
     .with_supports_all_types();
 
     // Create account with both clients as cosigners
     AccountBuilder::new(init_seed)
         .account_type(AccountType::RegularAccountUpdatableCode)
-        .storage_mode(AccountStorageMode::Private)
+        .storage_mode(AccountStorageMode::Public)  // Use Public mode like the test
         .with_auth_component(auth_component)
         .with_component(BasicWallet)
         .build()
@@ -190,32 +178,31 @@ pub fn build_multisig_config_advice(
 }
 
 #[allow(dead_code)]
-fn build_update_signers_script() -> Result<TransactionScript, MultisigError> {
-    let psm_source = NamedSource::new("openzeppelin::psm", PSM_LIB);
-    let psm_library = TransactionKernel::assembler()
-        .assemble_library([psm_source])
-        .map_err(|err| MultisigError::Assembly(format!("Failed to compile PSM library: {err}")))?;
+pub fn build_update_signers_script() -> Result<TransactionScript, String> {
+    // Compile the consolidated multisig+PSM library for use in transaction scripts
+    let multisig_psm_source = NamedSource::new("account_auth::multisig_psm", MULTISIG_PSM_AUTH);
 
-    let mut assembler = TransactionKernel::assembler()
-        .with_dynamic_library(psm_library)
-        .map_err(|err| MultisigError::Assembly(format!("Failed to add PSM library: {err}")))?;
+    // Compile as a library so it can be linked to transaction scripts
+    let multisig_psm_library = TransactionKernel::assembler()
+        .assemble_library([multisig_psm_source])
+        .map_err(|err| format!("Failed to compile multisig+PSM library: {err}"))?;
 
-    let multisig_module = NamedSource::new("account_auth::multisig", MULTISIG_AUTH);
-    assembler
-        .compile_and_statically_link(multisig_module)
-        .map_err(|err| MultisigError::Assembly(format!("Failed to link multisig module: {err}")))?;
+    // Build the transaction script that calls update_signers_and_threshold
+    let tx_script_code = "
+        use.account_auth::multisig_psm
 
-    let code = "
-    use.account_auth::multisig
-    begin
-    exec.multisig::update_signers_and_threshold
-    end";
+        begin
+            exec.multisig_psm::update_signers_and_threshold
+        end
+    ";
 
-    let program = assembler.with_debug_mode(true).assemble_program(code).map_err(|err| {
-        MultisigError::Assembly(format!("Failed to compile update-signers script: {err}"))
-    })?;
+    let tx_script = ScriptBuilder::new(true)
+        .with_dynamically_linked_library(&multisig_psm_library)
+        .map_err(|err| format!("Failed to link multisig+PSM library: {err}"))?
+        .compile_tx_script(tx_script_code)
+        .map_err(|err| format!("Failed to compile transaction script: {err}"))?;
 
-    Ok(TransactionScript::new(program))
+    Ok(tx_script)
 }
 
 #[allow(dead_code)]
@@ -232,7 +219,8 @@ where
     I: IntoIterator<Item = (Word, Vec<Felt>)>,
 {
     let (config_hash, config_values) = build_multisig_config_advice(threshold, signer_commitments);
-    let script = build_update_signers_script()?;
+    let script = build_update_signers_script()
+        .map_err(|err| MultisigError::Assembly(err))?;
 
     let request = TransactionRequestBuilder::new()
         .custom_script(script)
