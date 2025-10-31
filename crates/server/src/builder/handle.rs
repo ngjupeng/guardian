@@ -4,7 +4,9 @@ use tower_http::cors::CorsLayer;
 
 use crate::api::grpc::StateManagerService;
 use crate::api::grpc::state_manager::state_manager_server::StateManagerServer;
-use crate::api::http::{configure, get_delta, get_delta_since, get_pubkey, get_state, push_delta};
+use crate::api::http::{
+    configure, configure_auth, get_delta, get_delta_since, get_pubkey, get_state, push_delta,
+};
 use crate::state::AppState;
 
 /// Handle for a configured server instance
@@ -55,6 +57,7 @@ impl ServerHandle {
                     .route("/delta", get(get_delta))
                     .route("/delta/since", get(get_delta_since))
                     .route("/configure", post(configure))
+                    .route("/configure/auth", post(configure_auth))
                     .route("/state", get(get_state))
                     .route("/pubkey", get(get_pubkey))
                     .with_state(state);

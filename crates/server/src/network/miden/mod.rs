@@ -1,6 +1,6 @@
 pub mod account_inspector;
 
-use crate::metadata::auth::Credentials;
+use crate::metadata::auth::{Auth, Credentials};
 use crate::network::miden::account_inspector::MidenAccountInspector;
 use crate::network::{NetworkClient, NetworkType};
 use async_trait::async_trait;
@@ -216,6 +216,14 @@ impl NetworkClient for MidenNetworkClient {
                 &commitment_hex[..18]
             ))
         }
+    }
+
+    fn validate_auth_config(
+        &self,
+        state_json: &serde_json::Value,
+        auth: &Auth,
+    ) -> Result<(), String> {
+        auth.validate_storage(state_json)
     }
 }
 

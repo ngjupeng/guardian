@@ -40,6 +40,18 @@ impl Auth {
             }
         }
     }
+
+    /// Validate that the auth configuration matches the on-chain account state
+    ///
+    /// # Arguments
+    /// * `state_json` - The account state JSON from storage
+    pub fn validate_storage(&self, state_json: &serde_json::Value) -> Result<(), String> {
+        match self {
+            Auth::MidenFalconRpo { cosigner_pubkeys } => {
+                miden_falcon_rpo::validate_pubkeys_match_storage(cosigner_pubkeys, state_json)
+            }
+        }
+    }
 }
 
 impl TryFrom<crate::api::grpc::state_manager::AuthConfig> for Auth {

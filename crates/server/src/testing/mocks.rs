@@ -151,6 +151,14 @@ impl NetworkClient for MockNetworkClient {
             .pop()
             .unwrap_or(Ok(()))
     }
+
+    fn validate_auth_config(
+        &self,
+        _state_json: &serde_json::Value,
+        _auth: &crate::metadata::auth::Auth,
+    ) -> StdResult<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -262,6 +270,7 @@ pub struct MockMetadataStore {
     pub get_calls: Arc<StdMutex<Vec<String>>>,
     pub set_responses: Arc<StdMutex<Vec<StdResult<(), String>>>>,
     pub set_calls: Arc<StdMutex<Vec<crate::metadata::AccountMetadata>>>,
+    pub update_auth_responses: Arc<StdMutex<Vec<StdResult<(), String>>>>,
     pub list_responses: Arc<StdMutex<Vec<StdResult<Vec<String>, String>>>>,
 }
 
@@ -280,6 +289,11 @@ impl MockMetadataStore {
 
     pub fn with_set(self, response: StdResult<(), String>) -> Self {
         self.set_responses.lock().unwrap().push(response);
+        self
+    }
+
+    pub fn with_update_auth(self, response: StdResult<(), String>) -> Self {
+        self.update_auth_responses.lock().unwrap().push(response);
         self
     }
 
@@ -310,6 +324,19 @@ impl MetadataStore for MockMetadataStore {
     async fn set(&self, metadata: crate::metadata::AccountMetadata) -> StdResult<(), String> {
         self.set_calls.lock().unwrap().push(metadata);
         self.set_responses.lock().unwrap().pop().unwrap_or(Ok(()))
+    }
+
+    async fn update_auth(
+        &self,
+        _account_id: &str,
+        _auth: crate::metadata::auth::Auth,
+        _updated_at: &str,
+    ) -> StdResult<(), String> {
+        self.update_auth_responses
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(Ok(()))
     }
 
     async fn list(&self) -> StdResult<Vec<String>, String> {

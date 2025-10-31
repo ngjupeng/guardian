@@ -1,6 +1,6 @@
 pub mod miden;
 
-use crate::metadata::auth::Credentials;
+use crate::metadata::auth::{Auth, Credentials};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -49,6 +49,13 @@ pub trait NetworkClient: Send + Sync {
         &self,
         state_json: &serde_json::Value,
         credential: &Credentials,
+    ) -> Result<(), String>;
+
+    /// Validate that the auth configuration matches the on-chain account state
+    fn validate_auth_config(
+        &self,
+        state_json: &serde_json::Value,
+        auth: &Auth,
     ) -> Result<(), String>;
 }
 
