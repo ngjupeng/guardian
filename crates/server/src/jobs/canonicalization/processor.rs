@@ -207,9 +207,17 @@ impl DeltasProcessorBase {
 
         match verify_result {
             Ok(()) => {
-                let new_commitment = delta.new_commitment.clone();
-                self.canonicalize_verified_delta(delta, new_state_json, new_commitment)
-                    .await
+                if let Some(new_commitment) = delta.new_commitment.clone() {
+                    self.canonicalize_verified_delta(delta, new_state_json, new_commitment)
+                        .await
+                } else {
+                    tracing::error!(
+                        account_id = %delta.account_id,
+                        nonce = delta.nonce,
+                        "Delta has no new_commitment, cannot canonicalize"
+                    );
+                    Ok(())
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -305,6 +313,37 @@ impl DeltasProcessorBase {
             .map_err(|e| {
                 PsmError::StorageError(format!("Failed to update delta as canonical: {e}"))
             })?;
+
+        // Delete matching proposal now that delta is canonical
+        let proposal_id = {
+            let client = self.state.network_client.lock().await;
+            client
+                .delta_proposal_id(&delta.account_id, delta.nonce, &delta.delta_payload)
+                .ok()
+        };
+
+        if let Some(ref id) = proposal_id
+            && let Ok(_existing_proposal) = storage_backend
+                .pull_delta_proposal(&delta.account_id, id)
+                .await
+        {
+            tracing::info!(
+                account_id = %delta.account_id,
+                proposal_id = %id,
+                "Deleting matching proposal as delta is now canonical"
+            );
+            if let Err(e) = storage_backend
+                .delete_delta_proposal(&delta.account_id, id)
+                .await
+            {
+                tracing::warn!(
+                    account_id = %delta.account_id,
+                    proposal_id = %id,
+                    error = %e,
+                    "Failed to delete proposal, but continuing"
+                );
+            }
+        }
 
         Ok(())
     }

@@ -21,6 +21,15 @@ service StateManager {
 
   // Get server's public key
   rpc GetPubkey(GetPubkeyRequest) returns (GetPubkeyResponse);
+
+  // Submit a delta proposal
+  rpc PushDeltaProposal(PushDeltaProposalRequest) returns (PushDeltaProposalResponse);
+
+  // Get all delta proposals
+  rpc GetDeltaProposals(GetDeltaProposalsRequest) returns (GetDeltaProposalsResponse);
+
+  // Sign a delta proposal
+  rpc SignDeltaProposal(SignDeltaProposalRequest) returns (SignDeltaProposalResponse);
 }
 
 // Auth configuration - one of the auth types
@@ -99,6 +108,36 @@ message GetStateResponse {
   AccountState state = 3;
 }
 
+// Delta status
+message DeltaStatus {
+  oneof status {
+    PendingStatus pending = 1;
+    string candidate_at = 2;
+    string canonical_at = 3;
+    string discarded_at = 4;
+  }
+}
+
+// Pending status with cosigner signatures
+message PendingStatus {
+  string timestamp = 1;
+  string proposer_id = 2;
+  repeated CosignerSignature cosigner_sigs = 3;
+}
+
+// Cosigner signature
+message CosignerSignature {
+  string signer_id = 1;
+  ProposalSignature signature = 2;
+  string timestamp = 3;
+}
+
+// Structured proposal signature (mirrors JSON representation)
+message ProposalSignature {
+  string scheme = 1;
+  string signature = 2;
+}
+
 // Delta object
 message DeltaObject {
   string account_id = 1;
@@ -110,6 +149,7 @@ message DeltaObject {
   string candidate_at = 7;
   optional string canonical_at = 8;
   optional string discarded_at = 9;
+  optional DeltaStatus status = 10;
 }
 
 // Account state
@@ -126,4 +166,42 @@ message GetPubkeyRequest {}
 
 message GetPubkeyResponse {
   string pubkey = 1;
+}
+
+// Push delta proposal request
+message PushDeltaProposalRequest {
+  string account_id = 1;
+  uint64 nonce = 2;
+  string delta_payload = 3; // JSON string
+}
+
+message PushDeltaProposalResponse {
+  bool success = 1;
+  string message = 2;
+  DeltaObject delta = 3;
+  string commitment = 4;
+}
+
+// Get delta proposals request
+message GetDeltaProposalsRequest {
+  string account_id = 1;
+}
+
+message GetDeltaProposalsResponse {
+  bool success = 1;
+  string message = 2;
+  repeated DeltaObject proposals = 3;
+}
+
+// Sign delta proposal request
+message SignDeltaProposalRequest {
+  string account_id = 1;
+  string commitment = 2;
+  ProposalSignature signature = 3;
+}
+
+message SignDeltaProposalResponse {
+  bool success = 1;
+  string message = 2;
+  DeltaObject delta = 3;
 }

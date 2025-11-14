@@ -11,8 +11,9 @@ pub enum MenuAction {
     PullFromPsm,
     PullDeltasFromPsm,
     AddCosigner,
-    SignTransaction,
-    FinalizePendingTransaction,
+    ViewProposals,
+    SignProposal,
+    FinalizeProposal,
     ShowAccount,
     ShowStatus,
     Quit,
@@ -45,13 +46,18 @@ pub fn print_menu(state: &SessionState) {
     print_menu_option("6", "Add cosigner (update to N+1)", state.has_account());
     print_menu_option(
         "7",
-        "Sign pending transaction",
-        state.has_account() && state.pending_tx_store.has_pending(),
+        "View pending proposals",
+        state.has_account() && state.is_psm_connected(),
     );
     print_menu_option(
         "8",
-        "Finalize pending transaction",
-        state.has_account() && state.pending_tx_store.has_pending(),
+        "Sign a proposal",
+        state.has_account() && state.is_psm_connected(),
+    );
+    print_menu_option(
+        "9",
+        "Finalize a proposal",
+        state.has_account() && state.is_psm_connected(),
     );
     print_menu_option("s", "Show account details", state.has_account());
     print_menu_option("c", "Show connection status", true);
@@ -64,7 +70,7 @@ pub fn get_user_choice(editor: &mut DefaultEditor) -> Result<String, ReadlineErr
     let input = editor.readline("Choice: ")?;
     editor
         .add_history_entry(&input)
-        .map_err(|e| ReadlineError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| ReadlineError::Io(std::io::Error::other(e)))?;
 
     Ok(input.trim().to_lowercase())
 }
@@ -79,11 +85,10 @@ pub fn parse_menu_choice(choice: &str, state: &SessionState) -> Option<MenuActio
             Some(MenuAction::PullDeltasFromPsm)
         }
         "6" if state.has_account() => Some(MenuAction::AddCosigner),
-        "7" if state.has_account() && state.pending_tx_store.has_pending() => {
-            Some(MenuAction::SignTransaction)
-        }
-        "8" if state.has_account() && state.pending_tx_store.has_pending() => {
-            Some(MenuAction::FinalizePendingTransaction)
+        "7" if state.has_account() && state.is_psm_connected() => Some(MenuAction::ViewProposals),
+        "8" if state.has_account() && state.is_psm_connected() => Some(MenuAction::SignProposal),
+        "9" if state.has_account() && state.is_psm_connected() => {
+            Some(MenuAction::FinalizeProposal)
         }
         "s" if state.has_account() => Some(MenuAction::ShowAccount),
         "c" => Some(MenuAction::ShowStatus),
@@ -99,45 +104,6 @@ pub fn prompt_input(editor: &mut DefaultEditor, prompt: &str) -> Result<String, 
         .map_err(|e| format!("Input error: {}", e))
 }
 
-pub fn prompt_confirm(editor: &mut DefaultEditor, message: &str) -> Result<bool, String> {
-    let input = prompt_input(editor, &format!("{} (y/n): ", message))?;
-    Ok(input.to_lowercase() == "y" || input.to_lowercase() == "yes")
-}
-
 pub fn handle_invalid_choice() {
     print_error("Invalid choice or action not available");
-}
-
-pub fn run_menu_loop<F>(state: &SessionState, mut handler: F) -> Result<(), String>
-where
-    F: FnMut(&str, &SessionState) -> Result<bool, String>,
-{
-    let mut editor = DefaultEditor::new().map_err(|e| format!("Failed to create editor: {}", e))?;
-
-    loop {
-        print_menu(state);
-
-        let choice = match get_user_choice(&mut editor) {
-            Ok(c) => c,
-            Err(ReadlineError::Interrupted) => {
-                println!("\nInterrupted");
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("\nGoodbye!");
-                break;
-            }
-            Err(e) => {
-                print_error(&format!("Input error: {}", e));
-                continue;
-            }
-        };
-
-        let should_continue = handler(&choice, state)?;
-        if !should_continue {
-            break;
-        }
-    }
-
-    Ok(())
 }

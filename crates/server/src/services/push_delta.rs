@@ -78,7 +78,7 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
     };
 
     let mut result_delta = params.delta.clone();
-    result_delta.new_commitment = new_commitment;
+    result_delta.new_commitment = Some(new_commitment.clone());
     result_delta = state.ack.ack_delta(result_delta)?;
 
     let now = state.clock.now_rfc3339();
@@ -103,7 +103,7 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
 
         let new_state = StateObject {
             account_id: result_delta.account_id.clone(),
-            commitment: result_delta.new_commitment.clone(),
+            commitment: new_commitment.clone(),
             state_json: new_state_json,
             created_at: current_state.created_at.clone(),
             updated_at: now,
@@ -134,6 +134,43 @@ pub async fn push_delta(state: &AppState, params: PushDeltaParams) -> Result<Pus
                 );
                 PsmError::StorageError(format!("Failed to submit delta: {e}"))
             })?;
+
+        // Delete matching proposal now that delta is canonical
+        let proposal_id = {
+            let client = state.network_client.lock().await;
+            client
+                .delta_proposal_id(
+                    &params.delta.account_id,
+                    params.delta.nonce,
+                    &params.delta.delta_payload,
+                )
+                .ok()
+        };
+
+        if let Some(ref id) = proposal_id
+            && let Ok(_existing_proposal) = resolved
+                .backend
+                .pull_delta_proposal(&params.delta.account_id, id)
+                .await
+        {
+            tracing::info!(
+                account_id = %params.delta.account_id,
+                proposal_id = %id,
+                "Deleting matching proposal as delta is now canonical"
+            );
+            if let Err(e) = resolved
+                .backend
+                .delete_delta_proposal(&params.delta.account_id, id)
+                .await
+            {
+                tracing::warn!(
+                    account_id = %params.delta.account_id,
+                    proposal_id = %id,
+                    error = %e,
+                    "Failed to delete proposal, but continuing"
+                );
+            }
+        }
     }
 
     Ok(PushDeltaResult {

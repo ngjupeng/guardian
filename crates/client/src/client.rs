@@ -2,11 +2,15 @@ use crate::auth::Auth;
 use crate::error::{ClientError, ClientResult};
 use crate::proto::state_manager_client::StateManagerClient;
 use crate::proto::{
-    AuthConfig, ConfigureRequest, ConfigureResponse, GetDeltaRequest, GetDeltaResponse,
-    GetDeltaSinceRequest, GetDeltaSinceResponse, GetPubkeyRequest, GetStateRequest,
-    GetStateResponse, PushDeltaRequest, PushDeltaResponse,
+    AuthConfig, ConfigureRequest, ConfigureResponse, GetDeltaProposalsRequest,
+    GetDeltaProposalsResponse, GetDeltaRequest, GetDeltaResponse, GetDeltaSinceRequest,
+    GetDeltaSinceResponse, GetPubkeyRequest, GetStateRequest, GetStateResponse,
+    ProposalSignature as ProtoProposalSignature, PushDeltaProposalRequest,
+    PushDeltaProposalResponse, PushDeltaRequest, PushDeltaResponse, SignDeltaProposalRequest,
+    SignDeltaProposalResponse,
 };
 use miden_objects::account::AccountId;
+use private_state_manager_shared::ProposalSignature as JsonProposalSignature;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
@@ -25,6 +29,15 @@ impl PsmClient {
     pub fn with_auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    pub fn auth_pubkey_hex(&self) -> Result<String, ClientError> {
+        self.auth
+            .as_ref()
+            .map(|auth| auth.public_key_hex())
+            .ok_or_else(|| {
+                ClientError::InvalidResponse("PSM client has no auth configured".to_string())
+            })
     }
 
     fn add_auth_metadata(
@@ -175,5 +188,89 @@ impl PsmClient {
         let response = self.client.get_pubkey(request).await?;
         let inner = response.into_inner();
         Ok(inner.pubkey)
+    }
+
+    /// Push a delta proposal
+    pub async fn push_delta_proposal(
+        &mut self,
+        account_id: &AccountId,
+        nonce: u64,
+        delta_payload: impl serde::Serialize,
+    ) -> ClientResult<PushDeltaProposalResponse> {
+        let delta_payload_json = serde_json::to_string(&delta_payload)?;
+
+        let mut request = tonic::Request::new(PushDeltaProposalRequest {
+            account_id: account_id.to_string(),
+            nonce,
+            delta_payload: delta_payload_json,
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.push_delta_proposal(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    /// Get all delta proposals for an account
+    pub async fn get_delta_proposals(
+        &mut self,
+        account_id: &AccountId,
+    ) -> ClientResult<GetDeltaProposalsResponse> {
+        let mut request = tonic::Request::new(GetDeltaProposalsRequest {
+            account_id: account_id.to_string(),
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.get_delta_proposals(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+
+    /// Sign a delta proposal
+    pub async fn sign_delta_proposal(
+        &mut self,
+        account_id: &AccountId,
+        commitment: impl Into<String>,
+        signature: JsonProposalSignature,
+    ) -> ClientResult<SignDeltaProposalResponse> {
+        let proto_signature = Some(proto_signature_from_json(&signature));
+
+        let mut request = tonic::Request::new(SignDeltaProposalRequest {
+            account_id: account_id.to_string(),
+            commitment: commitment.into(),
+            signature: proto_signature,
+        });
+
+        self.add_auth_metadata(&mut request, account_id)?;
+
+        let response = self.client.sign_delta_proposal(request).await?;
+        let inner = response.into_inner();
+
+        if !inner.success {
+            return Err(ClientError::ServerError(inner.message.clone()));
+        }
+
+        Ok(inner)
+    }
+}
+
+fn proto_signature_from_json(signature: &JsonProposalSignature) -> ProtoProposalSignature {
+    match signature {
+        JsonProposalSignature::Falcon { signature } => ProtoProposalSignature {
+            scheme: "falcon".to_string(),
+            signature: signature.clone(),
+        },
     }
 }

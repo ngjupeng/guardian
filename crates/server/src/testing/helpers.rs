@@ -111,6 +111,16 @@ impl NetworkClient for IntegrationMockNetworkClient {
         self.miden_client.merge_deltas(delta_payloads)
     }
 
+    fn delta_proposal_id(
+        &self,
+        account_id: &str,
+        nonce: u64,
+        delta_payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.miden_client
+            .delta_proposal_id(account_id, nonce, delta_payload)
+    }
+
     fn validate_account_id(&self, account_id: &str) -> Result<(), String> {
         self.miden_client.validate_account_id(account_id)
     }
@@ -210,6 +220,19 @@ pub fn create_router(state: AppState) -> axum::Router {
         .route("/push_delta", axum::routing::post(http::push_delta))
         .route("/get_delta", axum::routing::get(http::get_delta))
         .route("/get_state", axum::routing::get(http::get_state))
+        .route("/pubkey", axum::routing::get(http::get_pubkey))
+        .route(
+            "/push_delta_proposal",
+            axum::routing::post(http::push_delta_proposal),
+        )
+        .route(
+            "/get_delta_proposals",
+            axum::routing::get(http::get_delta_proposals),
+        )
+        .route(
+            "/sign_delta_proposal",
+            axum::routing::post(http::sign_delta_proposal),
+        )
         .with_state(state)
 }
 
@@ -324,5 +347,31 @@ pub async fn update_mock_on_chain_commitment(
     let ptr = &mut *network_client as *mut dyn NetworkClient as *mut IntegrationMockNetworkClient;
     unsafe {
         (*ptr).register_account(account_id, commitment);
+    }
+}
+
+pub fn create_test_app_state_with_mocks(
+    storage: Arc<dyn StorageBackend>,
+    network_client: Arc<tokio::sync::Mutex<dyn NetworkClient>>,
+    metadata: Arc<dyn crate::metadata::MetadataStore>,
+) -> AppState {
+    let keystore_dir =
+        std::env::temp_dir().join(format!("psm_test_keystore_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&keystore_dir).expect("Failed to create keystore directory");
+
+    let mut storage_backends: HashMap<StorageType, Arc<dyn StorageBackend>> = HashMap::new();
+    storage_backends.insert(StorageType::Filesystem, storage);
+    let storage_registry = StorageRegistry::new(storage_backends);
+
+    let signer = MidenFalconRpoSigner::new(keystore_dir).expect("Failed to create signer");
+    let ack = Acknowledger::FilesystemMidenFalconRpo(signer);
+
+    AppState {
+        storage: storage_registry,
+        metadata,
+        network_client,
+        ack,
+        canonicalization: None, // Use optimistic mode for unit tests
+        clock: Arc::new(crate::clock::SystemClock),
     }
 }

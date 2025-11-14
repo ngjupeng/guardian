@@ -2667,6 +2667,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]
@@ -2679,6 +2680,7 @@ dependencies = [
  "axum",
  "chrono",
  "hex",
+ "miden-client",
  "miden-keystore",
  "miden-lib",
  "miden-objects",
@@ -2709,6 +2711,7 @@ dependencies = [
  "miden-lib",
  "miden-objects",
  "rand 0.8.5",
+ "serde",
  "serde_json",
 ]
 
