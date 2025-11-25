@@ -154,7 +154,7 @@ impl NetworkClient for MidenNetworkClient {
         let mut account = Account::from_json(prev_state_json)?;
         let inspector = MidenAccountInspector::new(&account);
 
-        let has_multisig_psm = inspector.has_multisig_auth();
+        let has_psm_auth = inspector.has_psm_auth();
 
         account
             .apply_delta(tx_summary.account_delta())
@@ -167,7 +167,7 @@ impl NetworkClient for MidenNetworkClient {
                 format!("Failed to apply delta to account: {e}")
             })?;
 
-        if has_multisig_psm {
+        if has_psm_auth {
             // Miden multisigs include a map of executed transactions to prevent replay attacks.
             // This affects determinism on simulations as the simulation won't pass the authentication,
             // therefore, the transaction won't be added to the mapping.
@@ -421,6 +421,45 @@ mod tests {
             result
                 .unwrap_err()
                 .contains("Invalid Miden account ID format")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_delta() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        let account_json: serde_json::Value =
+            serde_json::from_str(crate::testing::fixtures::ACCOUNT_JSON)
+                .expect("Failed to parse account fixture");
+
+        let delta_fixture: serde_json::Value =
+            serde_json::from_str(crate::testing::fixtures::DELTA_1_JSON)
+                .expect("Failed to parse delta fixture");
+
+        let delta_payload = delta_fixture
+            .get("delta_payload")
+            .expect("delta_payload field missing");
+
+        // Expected commitment after applying delta_1 with PSM auth replay protection
+        // The fixture account has PSM auth, so the replay protection mapping is updated
+        let expected_commitment =
+            "0xbe917d18feef35920bdcd0b091eb094f47a04fa529002034468ca06d3ed02d55";
+
+        let (new_state_json, new_commitment) = client
+            .apply_delta(&account_json, delta_payload)
+            .expect("apply_delta should succeed");
+
+        assert_eq!(
+            new_commitment, expected_commitment,
+            "Commitment after apply_delta should match expected"
+        );
+
+        assert!(
+            new_state_json.get("data").is_some(),
+            "New state should have data field"
         );
     }
 }
