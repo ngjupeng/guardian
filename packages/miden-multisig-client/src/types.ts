@@ -1,9 +1,7 @@
 import type { Account } from '@demox-labs/miden-sdk';
-import type { ProposalType as PsmProposalType } from '@openzeppelin/psm-client';
 import type {
   ExportedProposal,
   Proposal,
-  ProposalKind,
   ProposalMetadata,
   ProposalSignatureEntry,
   ProposalStatus,
@@ -18,7 +16,6 @@ export type {
   DeltaStatus,
   DeltaObject,
   StateObject,
-  ProposalType,
   ConfigureRequest,
   ConfigureResponse,
   PubkeyResponse,
@@ -31,10 +28,10 @@ export type {
 export type {
   ExportedProposal,
   Proposal,
-  ProposalKind,
   ProposalMetadata,
   ProposalSignatureEntry,
   ProposalStatus,
+  ProposalType,
 } from './types/proposal.js';
 
 export interface MultisigAccountState {

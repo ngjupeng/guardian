@@ -12,7 +12,6 @@ import type {
   MultisigConfig,
   NoteAsset,
   Proposal,
-  ProposalKind,
   ProposalMetadata,
   ProposalSignatureEntry,
   ProposalStatus,
@@ -191,15 +190,20 @@ export class Multisig {
       // This matches the Rust client behavior - we don't rely on server returning new_commitment
       const proposalId = computeCommitmentFromTxSummary(delta.delta_payload.tx_summary.data);
       const existingProposal = this.proposals.get(proposalId);
-      const proposal = this.deltaToProposal(delta, proposalId);
 
       // Prefer existing local metadata if available (we trust our own create calls)
       // Fall back to PSM metadata for proposals created by other signers
-      if (existingProposal?.metadata) {
-        proposal.metadata = existingProposal.metadata;
-      } else if (delta.delta_payload.metadata) {
-        proposal.metadata = fromPsmMetadata(delta.delta_payload.metadata);
+      const resolvedMetadata =
+        existingProposal?.metadata ??
+        (delta.delta_payload.metadata
+          ? (fromPsmMetadata(delta.delta_payload.metadata) as ProposalMetadata) ?? (delta.delta_payload.metadata as ProposalMetadata)
+          : undefined);
+      if (!resolvedMetadata) {
+        throw new Error('Missing proposal metadata from PSM');
       }
+
+      const proposal = this.deltaToProposal(delta, proposalId, resolvedMetadata);
+
       this.proposals.set(proposal.id, proposal);
     }
 
@@ -220,8 +224,8 @@ export class Multisig {
    * @param txSummaryBase64 - Base64-encoded transaction summary
    * @param metadata - Optional metadata for execution (target config, salt, etc.)
    */
-  async createProposal(nonce: number, txSummaryBase64: string, metadata?: ProposalMetadata): Promise<Proposal> {
-    const psmMetadata = metadata ? toPsmMetadata(metadata) : undefined;
+  async createProposal(nonce: number, txSummaryBase64: string, metadata: ProposalMetadata): Promise<Proposal> {
+    const psmMetadata = toPsmMetadata(metadata);
     const response = await this.psm.pushDeltaProposal({
       account_id: this._accountId,
       nonce,
@@ -232,10 +236,7 @@ export class Multisig {
       },
     });
 
-    const proposal = this.deltaToProposal(response.delta, response.commitment);
-    if (metadata) {
-      proposal.metadata = metadata;
-    }
+    const proposal = this.deltaToProposal(response.delta, response.commitment, metadata);
     this.proposals.set(proposal.id, proposal);
 
     return proposal;
@@ -269,7 +270,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'add_signer',
+      proposalType: 'add_signer',
       targetThreshold,
       targetSignerCommitments,
       saltHex: salt.toHex(),
@@ -332,7 +333,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'remove_signer',
+      proposalType: 'remove_signer',
       targetThreshold,
       targetSignerCommitments,
       saltHex: salt.toHex(),
@@ -376,7 +377,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'change_threshold',
+      proposalType: 'change_threshold',
       targetThreshold: newThreshold,
       targetSignerCommitments: this.signerCommitments,
       saltHex: salt.toHex(),
@@ -410,7 +411,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'switch_psm',
+      proposalType: 'switch_psm',
       saltHex: salt.toHex(),
       newPsmPubkey,
       newPsmEndpoint,
@@ -443,7 +444,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'consume_notes',
+      proposalType: 'consume_notes',
       noteIds,
       saltHex: salt.toHex(),
       description: `Consume ${noteIds.length} note(s)`,
@@ -484,7 +485,7 @@ export class Multisig {
     const proposalNonce = nonce ?? Date.now();
 
     const metadata: ProposalMetadata = {
-      kind: 'p2id',
+      proposalType: 'p2id',
       saltHex: salt.toHex(),
       recipientId,
       faucetId,
@@ -665,11 +666,11 @@ export class Multisig {
 
     const metadata = proposal.metadata;
     if (!metadata) {
-      throw new Error('Proposal missing metadata kind');
+      throw new Error('Proposal missing metadata');
     }
 
     let finalRequest: TransactionRequest;
-    switch (metadata.kind) {
+    switch (metadata.proposalType) {
       case 'consume_notes': {
         if (!metadata.noteIds || metadata.noteIds.length === 0) {
           throw new Error('Proposal missing noteIds. Was it created with createConsumeNotesProposal?');
@@ -844,7 +845,13 @@ export class Multisig {
         signature: { scheme: 'falcon' as const, signature: s.signatureHex },
         timestamp: s.timestamp || new Date().toISOString(),
       })),
-      metadata: exported.metadata,
+      metadata: (exported.metadata as ProposalMetadata) ?? {
+        proposalType: 'add_signer',
+        description: '',
+        targetThreshold: this.threshold,
+        targetSignerCommitments: this.signerCommitments,
+        saltHex: '',
+      },
     };
 
     // Add to local cache
@@ -901,7 +908,7 @@ export class Multisig {
     return this.exportProposalToJson(proposalId);
   }
 
-  private deltaToProposal(delta: DeltaObject, proposalId: string): Proposal {
+  private deltaToProposal(delta: DeltaObject, proposalId: string, metadata?: ProposalMetadata): Proposal {
     const status = this.deltaStatusToProposalStatus(delta.status);
 
     const signatures: ProposalSignatureEntry[] =
@@ -913,6 +920,12 @@ export class Multisig {
           }))
         : [];
 
+    const resolvedMetadata: ProposalMetadata | undefined =
+      metadata ??
+      (delta.delta_payload.metadata ? (fromPsmMetadata(delta.delta_payload.metadata) as ProposalMetadata) : undefined);
+    if (!resolvedMetadata) {
+      throw new Error('Missing proposal metadata');
+    }
     return {
       id: proposalId,
       accountId: delta.account_id,
@@ -920,6 +933,7 @@ export class Multisig {
       status,
       txSummary: delta.delta_payload.tx_summary.data,
       signatures,
+      metadata: resolvedMetadata,
     };
   }
 

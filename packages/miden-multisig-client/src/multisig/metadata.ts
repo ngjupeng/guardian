@@ -1,31 +1,29 @@
-import type { ProposalKind, ProposalMetadata } from '../types.js';
+import type { ProposalMetadata, ProposalType } from '../types.js';
 
-type RawPsmMetadata = {
-  proposalType?: string;
-  // Support snake_case variant just in case
-  proposal_type?: string;
-  targetThreshold?: number;
-  targetSignerCommitments?: string[];
-  saltHex?: string;
-  description?: string;
-  newPsmPubkey?: string;
-  newPsmEndpoint?: string;
-  noteIds?: string[];
-  recipientId?: string;
-  faucetId?: string;
-  amount?: string;
-} | undefined;
+type RawPsmMetadata =
+  | {
+      proposalType?: string;
+      targetThreshold?: number;
+      targetSignerCommitments?: string[];
+      saltHex?: string;
+      description?: string;
+      newPsmPubkey?: string;
+      newPsmEndpoint?: string;
+      noteIds?: string[];
+      recipientId?: string;
+      faucetId?: string;
+      amount?: string;
+    }
+  | undefined;
 
-const VALID_KINDS: ProposalKind[] = ['add_signer', 'remove_signer', 'change_threshold', 'switch_psm', 'consume_notes', 'p2id'];
+const VALID_TYPES: ProposalType[] = ['add_signer', 'remove_signer', 'change_threshold', 'switch_psm', 'consume_notes', 'p2id'];
 
-const inferKind = (raw: RawPsmMetadata): ProposalKind | undefined => {
+const inferProposalType = (raw: RawPsmMetadata): ProposalType | undefined => {
   if (!raw) return undefined;
-  // Use explicit proposalType (or snake_case proposal_type) if available and valid
-  const explicitType = raw.proposalType ?? raw.proposal_type;
-  if (explicitType && VALID_KINDS.includes(explicitType as ProposalKind)) {
-    return explicitType as ProposalKind;
+  const explicitType = raw.proposalType;
+  if (explicitType && VALID_TYPES.includes(explicitType as ProposalType)) {
+    return explicitType as ProposalType;
   }
-  // Fall back to inference from fields
   if (raw.recipientId || raw.faucetId || raw.amount) return 'p2id';
   if (raw.noteIds && raw.noteIds.length > 0) return 'consume_notes';
   if (raw.newPsmPubkey) return 'switch_psm';
@@ -35,13 +33,13 @@ const inferKind = (raw: RawPsmMetadata): ProposalKind | undefined => {
 
 export function fromPsmMetadata(raw: RawPsmMetadata): ProposalMetadata | undefined {
   if (!raw) return undefined;
-  const kind = inferKind(raw);
-  if (!kind) return undefined;
+  const proposalType = inferProposalType(raw);
+  if (!proposalType) return undefined;
 
-  if (kind === 'p2id') {
+  if (proposalType === 'p2id') {
     return {
-      kind,
-      description: raw.description,
+      proposalType,
+      description: raw.description ?? '',
       saltHex: raw.saltHex,
       recipientId: raw.recipientId ?? '',
       faucetId: raw.faucetId ?? '',
@@ -49,43 +47,47 @@ export function fromPsmMetadata(raw: RawPsmMetadata): ProposalMetadata | undefin
     };
   }
 
-  if (kind === 'consume_notes') {
+  if (proposalType === 'consume_notes') {
     return {
-      kind,
-      description: raw.description,
+      proposalType,
+      description: raw.description ?? '',
       saltHex: raw.saltHex,
       noteIds: raw.noteIds ?? [],
     };
   }
 
-  if (kind === 'switch_psm') {
+  if (proposalType === 'switch_psm') {
     return {
-      kind,
-      description: raw.description,
+      proposalType: proposalType as 'switch_psm',
+      description: raw.description ?? '',
       saltHex: raw.saltHex,
       newPsmPubkey: raw.newPsmPubkey ?? '',
       newPsmEndpoint: raw.newPsmEndpoint,
     };
   }
 
-  return {
-    kind,
-    description: raw.description,
-    saltHex: raw.saltHex,
-    targetThreshold: raw.targetThreshold ?? 0,
-    targetSignerCommitments: raw.targetSignerCommitments ?? [],
-  };
+  if (proposalType === 'add_signer' || proposalType === 'remove_signer' || proposalType === 'change_threshold') {
+    return {
+      proposalType,
+      description: raw.description ?? '',
+      saltHex: raw.saltHex,
+      targetThreshold: raw.targetThreshold ?? 0,
+      targetSignerCommitments: raw.targetSignerCommitments ?? [],
+    };
+  }
+
+  return undefined;
 }
 
 export function toPsmMetadata(metadata?: ProposalMetadata): Record<string, unknown> | undefined {
   if (!metadata) return undefined;
   const base = {
-    proposalType: metadata.kind,
-    description: metadata.description,
+    proposalType: metadata.proposalType,
+    description: metadata.description ?? '',
     saltHex: metadata.saltHex,
   };
 
-  switch (metadata.kind) {
+  switch (metadata.proposalType) {
     case 'p2id':
       return {
         ...base,
