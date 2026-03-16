@@ -8,12 +8,12 @@ import {
   Word,
   Word as WordType,
 } from '@miden-sdk/miden-sdk';
-import { PSM_ECDSA_MASM, PSM_MASM } from '../account/masm.js';
+import { PSM_MASM } from '../account/masm.js';
 import { normalizeHexWord } from '../utils/encoding.js';
 import { randomWord } from '../utils/random.js';
 import type { SignatureOptions } from './options.js';
 
-function buildUpdatePsmFalconScript(webClient: WebClient): TransactionScript {
+function buildUpdatePsmScript(webClient: WebClient): TransactionScript {
   const libBuilder = webClient.createCodeBuilder();
   const psmLib = libBuilder.buildLibrary('openzeppelin::psm', PSM_MASM);
   libBuilder.linkDynamicLibrary(psmLib);
@@ -31,33 +31,12 @@ end
   return libBuilder.compileTxScript(scriptSource);
 }
 
-function buildUpdatePsmEcdsaScript(webClient: WebClient): TransactionScript {
-  const libBuilder = webClient.createCodeBuilder();
-  const psmLib = libBuilder.buildLibrary('openzeppelin::psm_ecdsa', PSM_ECDSA_MASM);
-  libBuilder.linkDynamicLibrary(psmLib);
-
-  const scriptSource = `
-use openzeppelin::psm_ecdsa
-
-begin
-    adv.push_mapval
-    dropw
-    call.psm_ecdsa::update_psm_public_key
-end
-  `;
-
-  return libBuilder.compileTxScript(scriptSource);
-}
-
 export async function buildUpdatePsmTransactionRequest(
   webClient: WebClient,
   newPsmPubkey: string,
   options: SignatureOptions = {},
 ): Promise<{ request: TransactionRequest; salt: Word }> {
-  const signatureScheme = options.signatureScheme ?? 'falcon';
-  const script = signatureScheme === 'ecdsa'
-    ? buildUpdatePsmEcdsaScript(webClient)
-    : buildUpdatePsmFalconScript(webClient);
+  const script = buildUpdatePsmScript(webClient);
 
   const authSaltHex = options.salt ? options.salt.toHex() : randomWord().toHex();
 
@@ -87,3 +66,4 @@ export async function buildUpdatePsmTransactionRequest(
     salt: authSaltForReturn,
   };
 }
+

@@ -15,9 +15,7 @@ mod helpers;
 mod io;
 mod notes;
 mod offline;
-mod proposal;
 mod proposals;
-mod state_codec;
 
 use std::path::PathBuf;
 
@@ -42,8 +40,19 @@ pub use notes::{ConsumableNote, NoteFilter};
 pub enum ProposalResult {
     /// Proposal successfully created on PSM and ready for cosigners to sign.
     Online(Box<Proposal>),
-    /// Proposal created offline (PSM unavailable). Share with cosigners via file.
+    /// Offline proposal created when PSM is unavailable (`SwitchPsm` transactions only).
     Offline(Box<ExportedProposal>),
+}
+
+/// Result of explicit local-vs-on-chain account state verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateVerificationResult {
+    /// Account ID that was verified.
+    pub account_id: AccountId,
+    /// Local account commitment hex (with 0x prefix).
+    pub local_commitment_hex: String,
+    /// On-chain account commitment hex (with 0x prefix).
+    pub on_chain_commitment_hex: String,
 }
 
 /// Main client for interacting with multisig accounts.
@@ -55,7 +64,7 @@ pub enum ProposalResult {
 /// # Example
 ///
 /// ```ignore
-/// use miden_multisig_client::{MultisigClient, MultisigConfig, PsmConfig};
+/// use miden_multisig_client::MultisigClient;
 /// use miden_client::rpc::Endpoint;
 ///
 ///

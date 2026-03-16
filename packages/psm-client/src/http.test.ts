@@ -8,11 +8,12 @@ vi.stubGlobal('fetch', mockFetch);
 
 // Mock signer for authenticated requests
 const mockSigner: Signer = {
-  scheme: 'falcon',
   commitment: '0x' + '1'.repeat(64),
   publicKey: '0x' + '2'.repeat(64),
+  scheme: 'falcon',
   signAccountIdWithTimestamp: vi.fn().mockResolvedValue('0x' + 'a'.repeat(128)),
-  signCommitment: vi.fn().mockResolvedValue('0x' + 'b'.repeat(128)),
+  signRequest: vi.fn().mockReturnValue('0x' + 'a'.repeat(128)),
+  signCommitment: vi.fn().mockReturnValue('0x' + 'b'.repeat(128)),
 };
 
 describe('PsmHttpClient', () => {
@@ -35,19 +36,18 @@ describe('PsmHttpClient', () => {
   });
 
   describe('getPubkey', () => {
-    it('should return commitment and pubkey when available', async () => {
-      const expectedCommitment = '0x' + 'abc123'.repeat(10);
-      const expectedPubkey = '0x' + 'def456'.repeat(10);
+    it('should return server public key', async () => {
+      const expectedPubkey = '0x' + 'abc123'.repeat(10);
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ commitment: expectedCommitment, pubkey: expectedPubkey }),
+        json: async () => ({ commitment: expectedPubkey }),
       });
 
-      const pubkey = await client.getPubkey('ecdsa');
+      const pubkey = await client.getPubkey();
 
-      expect(pubkey).toEqual({ commitment: expectedCommitment, pubkey: expectedPubkey });
+      expect(pubkey).toEqual({ commitment: expectedPubkey, pubkey: undefined });
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:3000/pubkey?scheme=ecdsa',
+        'http://localhost:3000/pubkey',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({
@@ -238,6 +238,45 @@ describe('PsmHttpClient', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/delta/proposal?'),
         expect.objectContaining({ method: 'GET' })
+      );
+    });
+  });
+
+  describe('getDeltaProposal', () => {
+    it('should get a single delta proposal by commitment', async () => {
+      client.setSigner(mockSigner);
+
+      const serverProposal = {
+        account_id: '0x' + 'a'.repeat(30),
+        nonce: 1,
+        prev_commitment: '0x' + 'b'.repeat(64),
+        delta_payload: {
+          tx_summary: { data: 'base64summary' },
+          signatures: [],
+          metadata: { proposal_type: 'change_threshold' as const, target_threshold: 2, signer_commitments: [] },
+        },
+        status: {
+          status: 'pending' as const,
+          timestamp: '2024-01-01T00:00:00Z',
+          proposer_id: '0x' + 'c'.repeat(64),
+          cosigner_sigs: [],
+        },
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => serverProposal,
+      });
+
+      const accountId = '0x' + 'a'.repeat(30);
+      const commitment = '0x' + 'd'.repeat(64);
+      const proposal = await client.getDeltaProposal(accountId, commitment);
+
+      expect(proposal.accountId).toBe(accountId);
+      expect(proposal.nonce).toBe(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/delta/proposal/single?'),
+        expect.objectContaining({ method: 'GET' }),
       );
     });
   });

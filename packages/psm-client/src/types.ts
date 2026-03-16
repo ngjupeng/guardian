@@ -1,9 +1,16 @@
+import type { RequestAuthPayload } from './auth-request.js';
+
 export interface Signer {
   readonly commitment: string;
   readonly publicKey: string;
   readonly scheme: SignatureScheme;
-  signAccountIdWithTimestamp(accountId: string, timestamp: number): Promise<string>;
-  signCommitment(commitmentHex: string): Promise<string>;
+  signAccountIdWithTimestamp(accountId: string, timestamp: number): Promise<string> | string;
+  signRequest?(
+    accountId: string,
+    timestamp: number,
+    requestPayload: RequestAuthPayload
+  ): Promise<string> | string;
+  signCommitment(commitmentHex: string): Promise<string> | string;
 }
 
 export interface FalconSignature {
@@ -21,15 +28,17 @@ export type ProposalSignature = FalconSignature | EcdsaSignature;
 
 export type SignatureScheme = 'falcon' | 'ecdsa';
 
-export interface PubkeyResponse {
-  commitment: string;
-  pubkey?: string;
-}
-
 export type AuthConfig =
-  | { MidenFalconRpo: { cosigner_commitments: string[] } }
-  | { MidenEcdsa: { cosigner_commitments: string[] } };
-
+  | {
+      MidenFalconRpo: {
+        cosigner_commitments: string[];
+      };
+    }
+  | {
+      MidenEcdsa: {
+        cosigner_commitments: string[];
+      };
+    };
 
 export interface CosignerSignature {
   signerId: string;
@@ -47,6 +56,7 @@ export type ProposalType =
   | 'add_signer'
   | 'remove_signer'
   | 'change_threshold'
+  | 'update_procedure_threshold'
   | 'switch_psm'
   | 'consume_notes'
   | 'p2id'
@@ -56,7 +66,9 @@ export type ProposalType =
 export interface ProposalMetadata {
   proposalType?: ProposalType;
   targetThreshold?: number;
+  requiredSignatures?: number;
   signerCommitments?: string[];
+  targetProcedure?: string;
   salt?: string;
   description?: string;
   newPsmPubkey?: string;
@@ -113,6 +125,11 @@ export interface ConfigureResponse {
   message: string;
   ackPubkey?: string;
   ackCommitment?: string;
+}
+
+export interface PubkeyResponse {
+  commitment: string;
+  pubkey?: string;
 }
 
 export interface DeltaProposalRequest {

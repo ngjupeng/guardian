@@ -7,12 +7,11 @@ pub use miden_ecdsa::EcdsaSigner;
 pub use miden_falcon_rpo::{
     FalconRpoSigner, account_id_timestamp_to_word, verify_commitment_signature,
 };
+
 use miden_protocol::account::AccountId;
+use private_state_manager_shared::auth_request_payload::AuthRequestPayload;
 
 /// Authentication provider for PSM requests.
-///
-/// Wraps different signing implementations that can authenticate requests
-/// to the PSM server.
 pub enum Auth {
     /// Falcon-based authentication using RPO hashing.
     FalconRpoSigner(FalconRpoSigner),
@@ -29,13 +28,34 @@ impl Auth {
         }
     }
 
-    /// Signs an account ID with a timestamp and returns the hex-encoded signature.
+    /// Signs an account ID with a timestamp.
+    ///
+    /// This compatibility helper is kept for callers that still construct the
+    /// legacy digest without binding request bytes.
     pub fn sign_account_id_with_timestamp(&self, account_id: &AccountId, timestamp: i64) -> String {
         match self {
             Auth::FalconRpoSigner(signer) => {
                 signer.sign_account_id_with_timestamp(account_id, timestamp)
             }
             Auth::EcdsaSigner(signer) => {
+                signer.sign_account_id_with_timestamp(account_id, timestamp)
+            }
+        }
+    }
+
+    /// Signs the request-bound auth message for this request.
+    pub fn sign_request_message(
+        &self,
+        account_id: &AccountId,
+        timestamp: i64,
+        payload: AuthRequestPayload,
+    ) -> String {
+        match self {
+            Auth::FalconRpoSigner(signer) => {
+                signer.sign_request_message(account_id, timestamp, payload)
+            }
+            Auth::EcdsaSigner(signer) => {
+                let _ = payload;
                 signer.sign_account_id_with_timestamp(account_id, timestamp)
             }
         }
@@ -62,16 +82,10 @@ mod tests {
 
         assert!(signature_hex.starts_with("0x"));
 
-        // Verify the signature is valid
         let sig_bytes = hex::decode(signature_hex.strip_prefix("0x").unwrap()).unwrap();
         let signature = Signature::read_from_bytes(&sig_bytes).unwrap();
-
         let message = account_id_timestamp_to_word(account_id, timestamp);
 
-        // Verify signature with public key
-        assert!(
-            public_key.verify(message, &signature),
-            "Signature verification failed"
-        );
+        assert!(public_key.verify(message, &signature));
     }
 }

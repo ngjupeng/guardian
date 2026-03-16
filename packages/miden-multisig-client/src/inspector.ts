@@ -1,9 +1,13 @@
+/**
+ * Account Inspector - Inspects account storage to detect multisig configuration.
+ */
+
 import { Account, Word } from '@miden-sdk/miden-sdk';
 import { base64ToUint8Array } from './utils/encoding.js';
 import { wordElementToBigInt, wordToHex } from './utils/word.js';
 import { getProcedureRoot, getProcedureNames, type ProcedureName } from './procedures.js';
-import type { SignatureScheme } from './types.js';
 
+// Storage slot names matching the MASM definitions
 const MULTISIG_SLOT_NAMES = {
   THRESHOLD_CONFIG: 'openzeppelin::multisig::threshold_config',
   SIGNER_PUBLIC_KEYS: 'openzeppelin::multisig::signer_public_keys',
@@ -29,19 +33,44 @@ export interface DetectedMultisigConfig {
   psmCommitment: string | null;
   vaultBalances: VaultBalance[];
   procedureThresholds: Map<ProcedureName, number>;
-  signatureScheme: SignatureScheme;
 }
 
+/**
+ * Inspects an account to detect its multisig configuration.
+ *
+ * @example
+ * ```typescript
+ * // From base64-encoded state
+ * const config = AccountInspector.fromBase64(stateDataBase64);
+ * console.log(`${config.threshold}-of-${config.numSigners} multisig`);
+ *
+ * // From Miden SDK Account
+ * const config = AccountInspector.fromAccount(account);
+ * ```
+ */
 export class AccountInspector {
   private constructor() {}
 
-  static fromBase64(base64Data: string, signatureScheme: SignatureScheme = 'falcon'): DetectedMultisigConfig {
-    const bytes = base64ToUint8Array(base64Data);
-    const account = Account.deserialize(bytes);
-    return AccountInspector.fromAccount(account, signatureScheme);
+  /**
+   * Inspect a base64-encoded serialized account.
+   *
+   * @param base64Data - Base64-encoded Account bytes
+   * @returns Detected multisig configuration
+   */
+  static fromBase64(base64Data: string): DetectedMultisigConfig {
+      const bytes = base64ToUint8Array(base64Data);
+      const account = Account.deserialize(bytes);
+      return AccountInspector.fromAccount(account);
   }
 
-  static fromAccount(account: Account, signatureScheme: SignatureScheme = 'falcon'): DetectedMultisigConfig {
+  /**
+   * Inspect a Miden SDK Account object.
+   *
+   * @param account - The Account object from Miden SDK
+   * @returns Detected multisig configuration
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  static fromAccount(account: Account): DetectedMultisigConfig {
     const storage = account.storage();
 
     const slot0 = storage.getItem(MULTISIG_SLOT_NAMES.THRESHOLD_CONFIG) as Word;
@@ -56,7 +85,8 @@ export class AccountInspector {
         if (commitment) {
           signerCommitments.push(wordToHex(commitment));
         }
-      } catch {
+      } catch (error) {
+        console.warn(error);
       }
     }
 
@@ -75,7 +105,8 @@ export class AccountInspector {
           psmCommitment = wordToHex(psmKey);
         }
       }
-    } catch {
+    } catch (error) {
+      console.warn(error);
     }
 
     const vaultBalances: VaultBalance[] = [];
@@ -88,13 +119,16 @@ export class AccountInspector {
           amount: BigInt(asset.amount()),
         });
       }
-    } catch {
+    } catch (error) {
+      console.warn(error);
     }
 
+    // Read procedure threshold overrides from storage slot 3
+    // Storage layout: slot 3 is a map of PROC_ROOT => [threshold, 0, 0, 0]
     const procedureThresholds = new Map<ProcedureName, number>();
-    for (const procName of getProcedureNames(signatureScheme)) {
+    for (const procName of getProcedureNames()) {
       try {
-        const rootHex = getProcedureRoot(procName, signatureScheme);
+        const rootHex = getProcedureRoot(procName);
         const rootWord = Word.fromHex(rootHex);
         const value = storage.getMapItem(MULTISIG_SLOT_NAMES.PROCEDURE_THRESHOLDS, rootWord) as Word;
         if (value) {
@@ -104,6 +138,7 @@ export class AccountInspector {
           }
         }
       } catch {
+        // Procedure threshold not set - use default
       }
     }
 
@@ -115,7 +150,6 @@ export class AccountInspector {
       psmCommitment,
       vaultBalances,
       procedureThresholds,
-      signatureScheme,
     };
   }
 }

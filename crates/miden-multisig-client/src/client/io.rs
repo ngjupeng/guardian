@@ -4,6 +4,7 @@
 //! importing them back for offline sharing workflows.
 
 use private_state_manager_client::delta_status::Status;
+use private_state_manager_shared::SignatureScheme;
 
 use super::MultisigClient;
 use crate::error::{MultisigError, Result};
@@ -50,36 +51,26 @@ impl MultisigClient {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The proposal is not found in the parsed proposals list
+    /// - The proposal is not found in PSM
     /// - The raw delta cannot be found in PSM response
     /// - The delta has no pending status with signature data
     async fn export_proposal_to_exported(&mut self, proposal_id: &str) -> Result<ExportedProposal> {
         let account = self.require_account()?.clone();
         let account_id = account.id();
-
-        let proposals = self.list_proposals().await?;
-        let proposal = proposals
-            .iter()
-            .find(|p| p.id == proposal_id)
-            .ok_or_else(|| MultisigError::ProposalNotFound(proposal_id.to_string()))?;
-
         let mut psm_client = self.create_authenticated_psm_client().await?;
-        let proposals_response = psm_client
-            .get_delta_proposals(&account_id)
+        let response = psm_client
+            .get_delta_proposal(&account_id, proposal_id)
             .await
-            .map_err(|e| MultisigError::PsmServer(format!("failed to get proposals: {}", e)))?;
+            .map_err(|e| MultisigError::PsmServer(format!("failed to get proposal: {}", e)))?;
+        let raw_proposal = response
+            .proposal
+            .as_ref()
+            .ok_or_else(|| MultisigError::ProposalNotFound(proposal_id.to_string()))?;
+        Self::ensure_proposal_account_id(&raw_proposal.account_id, &account_id)?;
+        let proposal = crate::proposal::Proposal::from(raw_proposal)?;
+        self.verify_proposal_summary_binding(&proposal).await?;
 
-        let raw_proposal = proposals_response
-            .proposals
-            .iter()
-            .find(|p| p.nonce == proposal.nonce)
-            .ok_or_else(|| {
-                MultisigError::ProposalNotFound(format!(
-                    "raw delta not found for proposal {} (nonce {})",
-                    proposal_id, proposal.nonce
-                ))
-            })?;
-
+        // Extract signatures - fail if status structure is missing
         let status = raw_proposal.status.as_ref().ok_or_else(|| {
             MultisigError::PsmServer(format!("proposal {} has no status field", proposal_id))
         })?;
@@ -101,15 +92,22 @@ impl MultisigClient {
         let mut signatures = Vec::new();
         for cosigner_sig in pending.cosigner_sigs.iter() {
             if let Some(ref sig) = cosigner_sig.signature {
+                let scheme = if sig.scheme.eq_ignore_ascii_case("ecdsa") {
+                    SignatureScheme::Ecdsa
+                } else {
+                    SignatureScheme::Falcon
+                };
                 signatures.push(ExportedSignature {
                     signer_commitment: cosigner_sig.signer_id.clone(),
                     signature: sig.signature.clone(),
+                    scheme,
+                    public_key_hex: sig.public_key.clone(),
                 });
             }
         }
 
         let exported =
-            ExportedProposal::from_proposal(proposal, account_id).with_signatures(signatures);
+            ExportedProposal::from_proposal(&proposal, account_id)?.with_signatures(signatures);
 
         Ok(exported)
     }
@@ -122,13 +120,13 @@ impl MultisigClient {
     /// # Example
     ///
     /// ```ignore
-    /// let proposal = client.import_proposal("/tmp/proposal.json")?;
+    /// let proposal = client.import_proposal("/tmp/proposal.json").await?;
     /// println!("Imported proposal: {}", proposal.id);
     /// ```
-    pub fn import_proposal(&self, path: &std::path::Path) -> Result<ExportedProposal> {
+    pub async fn import_proposal(&mut self, path: &std::path::Path) -> Result<ExportedProposal> {
         let json = std::fs::read_to_string(path)
             .map_err(|e| MultisigError::InvalidConfig(format!("failed to read file: {}", e)))?;
-        self.import_proposal_from_string(&json)
+        self.import_proposal_from_string(&json).await
     }
 
     /// Imports a proposal from a JSON string.
@@ -136,20 +134,14 @@ impl MultisigClient {
     /// # Example
     ///
     /// ```ignore
-    /// let proposal = client.import_proposal_from_string(&json)?;
+    /// let proposal = client.import_proposal_from_string(&json).await?;
     /// ```
-    pub fn import_proposal_from_string(&self, json: &str) -> Result<ExportedProposal> {
+    pub async fn import_proposal_from_string(&mut self, json: &str) -> Result<ExportedProposal> {
         let exported = ExportedProposal::from_json(json)?;
+        exported.validate(self.account.as_ref().map(|account| account.id()))?;
 
-        if let Some(account) = &self.account {
-            let expected_id = account.id().to_string();
-            if !exported.account_id.eq_ignore_ascii_case(&expected_id) {
-                return Err(MultisigError::InvalidConfig(format!(
-                    "proposal account {} does not match loaded account {}",
-                    exported.account_id, expected_id
-                )));
-            }
-        }
+        let proposal = exported.to_proposal()?;
+        self.verify_proposal_summary_binding(&proposal).await?;
 
         Ok(exported)
     }

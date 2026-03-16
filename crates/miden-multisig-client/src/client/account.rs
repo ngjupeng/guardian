@@ -3,9 +3,11 @@
 //! This module handles account creation, pulling/pushing from PSM,
 //! syncing, and registration operations.
 
+use std::collections::HashSet;
+
 use base64::Engine;
-use miden_client::Serializable;
 use miden_client::account::Account;
+use miden_client::{Deserializable, Serializable};
 use miden_confidential_contracts::multisig_psm::{MultisigPsmBuilder, MultisigPsmConfig};
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
@@ -13,24 +15,39 @@ use private_state_manager_client::{
     AuthConfig, ClientError as PsmClientError, MidenEcdsaAuth, MidenFalconRpoAuth,
     TryIntoTxSummary, auth_config::AuthType,
 };
-
 use private_state_manager_shared::SignatureScheme;
 
-use super::MultisigClient;
-use super::state_codec::{decode_account_from_state_json, is_commitment_mismatch_error};
+use super::{MultisigClient, StateVerificationResult};
 use crate::account::MultisigAccount;
-use crate::config::ProcedureThreshold;
 use crate::error::{MultisigError, Result};
-use crate::keystore::commitment_from_hex;
+use crate::keystore::word_from_hex;
+use crate::procedures::ProcedureThreshold;
+use crate::transaction::word_to_hex;
 
 impl MultisigClient {
+    fn ensure_unique_signer_commitments(signer_commitments: &[Word]) -> Result<()> {
+        let mut seen = HashSet::new();
+
+        for commitment in signer_commitments {
+            let commitment_hex = word_to_hex(commitment);
+            if !seen.insert(commitment_hex.clone()) {
+                return Err(MultisigError::InvalidConfig(format!(
+                    "duplicate signer commitment: {}",
+                    commitment_hex
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a new multisig account.
     ///
     /// # Arguments
     /// * `threshold` - Minimum number of signatures required (default threshold)
     /// * `signer_commitments` - Public key commitments of all signers
     ///
-    /// For per-procedure thresholds, use `create_account_with_config` instead.
+    /// For per-procedure thresholds, use `create_account_with_proc_thresholds` instead.
     pub async fn create_account(
         &mut self,
         threshold: u32,
@@ -58,7 +75,7 @@ impl MultisigClient {
     /// ];
     ///
     /// let account = client.create_account_with_proc_thresholds(
-    ///     2,
+    ///     2,  // default 2-of-3
     ///     signer_commitments,
     ///     thresholds,
     /// ).await?;
@@ -69,25 +86,31 @@ impl MultisigClient {
         signer_commitments: Vec<Word>,
         proc_threshold_overrides: Vec<ProcedureThreshold>,
     ) -> Result<&MultisigAccount> {
+        Self::ensure_unique_signer_commitments(&signer_commitments)?;
         let signature_scheme = self.key_manager.scheme();
+
+        // Get PSM server's public key commitment
         let mut psm_client = self.create_psm_client().await?;
-        let (psm_pubkey_hex, _) = psm_client
+        let (psm_commitment_hex, _raw_pubkey) = psm_client
             .get_pubkey(Some(&signature_scheme.to_string()))
             .await
             .map_err(|e| MultisigError::PsmServer(format!("failed to get PSM pubkey: {}", e)))?;
 
         let psm_commitment =
-            commitment_from_hex(&psm_pubkey_hex).map_err(MultisigError::HexDecode)?;
+            word_from_hex(&psm_commitment_hex).map_err(MultisigError::HexDecode)?;
 
+        // Convert procedure thresholds to (Word, u32) pairs
         let overrides: Vec<(Word, u32)> = proc_threshold_overrides
             .iter()
             .map(|pt| (pt.procedure_root(), pt.threshold))
             .collect();
 
+        // Create the multisig account config
         let psm_config = MultisigPsmConfig::new(threshold, signer_commitments, psm_commitment)
             .with_signature_scheme(signature_scheme)
             .with_proc_threshold_overrides(overrides);
 
+        // Generate a random seed for account ID
         let mut seed = [0u8; 32];
         rand::Rng::fill(&mut rand::rng(), &mut seed);
 
@@ -96,9 +119,11 @@ impl MultisigClient {
             .build()
             .map_err(|e| MultisigError::MidenClient(format!("failed to build account: {}", e)))?;
 
+        // Add to miden-client
         self.add_or_update_account(&account, false).await?;
 
-        let multisig_account = MultisigAccount::new(account, &self.psm_endpoint);
+        // Wrap in MultisigAccount and store
+        let multisig_account = MultisigAccount::new(account);
         self.account = Some(multisig_account);
 
         Ok(self.account.as_ref().unwrap())
@@ -108,10 +133,35 @@ impl MultisigClient {
     ///
     /// Use this when joining an existing multisig as a cosigner.
     pub async fn pull_account(&mut self, account_id: AccountId) -> Result<&MultisigAccount> {
-        let account = self.fetch_account_from_psm(account_id).await?;
+        let mut psm_client = self.create_authenticated_psm_client().await?;
+
+        let state_response = psm_client
+            .get_state(&account_id)
+            .await
+            .map_err(|e| MultisigError::PsmServer(format!("failed to get state: {}", e)))?;
+
+        let state_obj = state_response
+            .state
+            .ok_or_else(|| MultisigError::PsmServer("no state returned from PSM".to_string()))?;
+
+        let state_value: serde_json::Value = serde_json::from_str(&state_obj.state_json)?;
+
+        let account_base64 = state_value["data"]
+            .as_str()
+            .ok_or_else(|| MultisigError::PsmServer("missing 'data' field in state".to_string()))?;
+
+        let account_bytes = base64::engine::general_purpose::STANDARD
+            .decode(account_base64)
+            .map_err(|e| MultisigError::MidenClient(format!("failed to decode account: {}", e)))?;
+
+        let account = Account::read_from_bytes(&account_bytes).map_err(|e| {
+            MultisigError::MidenClient(format!("failed to deserialize account: {}", e))
+        })?;
 
         self.add_or_update_account(&account, true).await?;
-        self.cache_account(account);
+
+        let multisig_account = MultisigAccount::new(account);
+        self.account = Some(multisig_account);
 
         Ok(self.account.as_ref().unwrap())
     }
@@ -147,6 +197,7 @@ impl MultisigClient {
 
         let account_id = account.id();
 
+        // Configure account on PSM
         psm_client
             .configure(&account_id, auth_config, initial_state)
             .await
@@ -156,22 +207,39 @@ impl MultisigClient {
     }
 
     /// Syncs state with the Miden network.
-    ///
-    /// This follows the same approach as the web client's syncState():
     pub async fn sync(&mut self) -> Result<()> {
-        self.miden_client
-            .sync_state()
-            .await
-            .map_err(|e| MultisigError::MidenClient(format!("failed to sync state: {:#?}", e)))?;
+        self.sync_network_state().await?;
 
         let account_updated = self.sync_from_psm_internal().await?;
 
         if account_updated {
-            self.miden_client.sync_state().await.map_err(|e| {
-                MultisigError::MidenClient(format!("failed to sync after PSM update: {:#?}", e))
-            })?;
+            self.sync_network_state().await?;
         }
 
+        self.refresh_cached_account_from_store().await
+    }
+
+    /// Syncs only with the Miden network and refreshes local cached account state.
+    pub(crate) async fn sync_network_only(&mut self) -> Result<()> {
+        self.sync_network_state().await?;
+        self.refresh_cached_account_from_store().await
+    }
+
+    /// Syncs account state from PSM into the local miden-client store.
+    pub async fn sync_from_psm(&mut self) -> Result<()> {
+        self.sync_from_psm_internal().await?;
+        Ok(())
+    }
+
+    async fn sync_network_state(&mut self) -> Result<()> {
+        self.miden_client
+            .sync_state()
+            .await
+            .map_err(|e| MultisigError::MidenClient(format!("failed to sync state: {:#?}", e)))?;
+        Ok(())
+    }
+
+    async fn refresh_cached_account_from_store(&mut self) -> Result<()> {
         if let Some(current) = self.account.take() {
             let account_id = current.id();
             let account_record = self
@@ -187,27 +255,52 @@ impl MultisigClient {
             let account: Account = account_record.try_into().map_err(|e| {
                 MultisigError::MidenClient(format!("account record is not full: {}", e))
             })?;
-            let refreshed = MultisigAccount::new(account, &self.psm_endpoint);
+            let refreshed = MultisigAccount::new(account);
             self.account = Some(refreshed);
         }
 
         Ok(())
     }
 
-    /// Syncs account state from PSM into the local miden-client store.
-    ///
-    /// This mirrors the web client's syncState() approach:
-    /// - Fetches full state from PSM
-    /// - Compares PSM commitment with local commitment
-    /// - If they differ and PSM has newer state, overwrites local with PSM state
-    /// - If local is newer (e.g., after execution before PSM canonicalizes), keeps local
-    ///
-    /// This is simpler and more robust than applying incremental deltas.
-    pub async fn sync_from_psm(&mut self) -> Result<()> {
-        self.sync_from_psm_internal().await?;
-        Ok(())
+    /// Explicitly verifies that local account state commitment matches on-chain commitment.
+    pub async fn verify_state_commitment(&self) -> Result<StateVerificationResult> {
+        let account = self.require_account()?;
+        let account_id = account.id();
+        let local_commitment = account.commitment();
+        let on_chain_commitment = self.get_on_chain_account_commitment(account_id).await?;
+
+        if local_commitment != on_chain_commitment {
+            return Err(MultisigError::InvalidConfig(format!(
+                "local account commitment does not match on-chain commitment for account {}: local={}, on_chain={}",
+                account_id,
+                word_to_hex(&local_commitment),
+                word_to_hex(&on_chain_commitment)
+            )));
+        }
+
+        Ok(StateVerificationResult {
+            account_id,
+            local_commitment_hex: word_to_hex(&local_commitment),
+            on_chain_commitment_hex: word_to_hex(&on_chain_commitment),
+        })
     }
 
+    async fn ensure_safe_to_overwrite_local_state(
+        &self,
+        account_id: AccountId,
+        incoming_commitment: Word,
+    ) -> Result<()> {
+        match self.try_get_on_chain_account_commitment(account_id).await? {
+            None => Ok(()),
+            Some(on_chain_commitment) if on_chain_commitment == incoming_commitment => Ok(()),
+            Some(on_chain_commitment) => Err(MultisigError::InvalidConfig(format!(
+                "refusing to overwrite local state: incoming commitment does not match on-chain commitment for account {}: incoming={}, on_chain={}",
+                account_id,
+                word_to_hex(&incoming_commitment),
+                word_to_hex(&on_chain_commitment)
+            ))),
+        }
+    }
     /// Internal sync from PSM that returns whether the account was updated.
     async fn sync_from_psm_internal(&mut self) -> Result<bool> {
         let account = self.require_account()?;
@@ -215,6 +308,7 @@ impl MultisigClient {
         let local_commitment = account.inner().commitment();
         let local_nonce = account.nonce();
 
+        // Fetch state from PSM
         let mut psm_client = self.create_authenticated_psm_client().await?;
         let state_response = psm_client.get_state(&account_id).await.map_err(|e| {
             MultisigError::PsmServer(format!("failed to get state from PSM: {}", e))
@@ -224,31 +318,58 @@ impl MultisigClient {
             .state
             .ok_or_else(|| MultisigError::PsmServer("no state returned from PSM".to_string()))?;
 
+        // Parse PSM commitment
         let psm_commitment_hex = &state_obj.commitment;
-        let psm_commitment =
-            crate::commitment_from_hex(psm_commitment_hex).map_err(MultisigError::HexDecode)?;
+        let psm_commitment = word_from_hex(psm_commitment_hex).map_err(MultisigError::HexDecode)?;
 
+        // Compare commitments - if they match, no update needed
         if local_commitment == psm_commitment {
             return Ok(false);
         }
 
-        let fresh_account = decode_account_from_state_json(&state_obj.state_json)?;
+        // Commitments differ - deserialize PSM state to check nonce
+        let state_value: serde_json::Value = serde_json::from_str(&state_obj.state_json)?;
 
+        let account_base64 = state_value["data"]
+            .as_str()
+            .ok_or_else(|| MultisigError::PsmServer("missing 'data' field in state".to_string()))?;
+
+        let account_bytes = base64::engine::general_purpose::STANDARD
+            .decode(account_base64)
+            .map_err(|e| MultisigError::MidenClient(format!("failed to decode account: {}", e)))?;
+
+        let fresh_account = Account::read_from_bytes(&account_bytes).map_err(|e| {
+            MultisigError::MidenClient(format!("failed to deserialize account: {}", e))
+        })?;
+
+        // Compare nonces - if local is newer or equal, don't overwrite with PSM's older state.
+        // This happens after executing a transaction before PSM canonicalizes.
         let psm_nonce = fresh_account.nonce().as_int();
         if local_nonce >= psm_nonce {
+            // Local state is newer, skip PSM update
             return Ok(false);
         }
 
+        self.ensure_safe_to_overwrite_local_state(account_id, fresh_account.commitment())
+            .await?;
+
+        // PSM has newer state - try to add/update.
+        // If we get a commitment mismatch (locked state), reset and retry.
         match self.add_or_update_account(&fresh_account, true).await {
             Ok(()) => {}
-            Err(e) if is_commitment_mismatch_error(&e) => {
+            Err(e)
+                if e.to_string()
+                    .contains("doesn't match the imported account commitment") =>
+            {
+                // Reset miden-client and try again with fresh state
                 self.reset_miden_client().await?;
                 self.add_or_update_account(&fresh_account, true).await?;
             }
             Err(e) => return Err(e),
         }
 
-        self.cache_account(fresh_account);
+        let multisig_account = MultisigAccount::new(fresh_account);
+        self.account = Some(multisig_account);
 
         Ok(true)
     }
@@ -258,11 +379,13 @@ impl MultisigClient {
         let account = self.require_account()?.clone();
         let account_id = account.id();
         let current_nonce = account.nonce();
+        let from_nonce = current_nonce.saturating_add(1);
 
         let mut psm_client = self.create_authenticated_psm_client().await?;
-        let response = match psm_client.get_delta_since(&account_id, current_nonce).await {
+        let response = match psm_client.get_delta_since(&account_id, from_nonce).await {
             Ok(resp) => resp,
             Err(PsmClientError::ServerError(msg)) if msg.contains("not found") => {
+                // No new deltas since current nonce - this is not an error
                 return Ok(());
             }
             Err(e) => {
@@ -276,6 +399,18 @@ impl MultisigClient {
         let merged_delta = response
             .merged_delta
             .ok_or_else(|| MultisigError::PsmServer("no merged_delta in response".to_string()))?;
+
+        let expected_prev_commitment = if merged_delta.prev_commitment.is_empty() {
+            None
+        } else {
+            Some(word_from_hex(&merged_delta.prev_commitment).map_err(MultisigError::HexDecode)?)
+        };
+
+        if let Some(prev_commitment) = expected_prev_commitment
+            && account.commitment() != prev_commitment
+        {
+            return Ok(());
+        }
 
         let tx_summary = merged_delta.try_into_tx_summary().map_err(|e| {
             MultisigError::MidenClient(format!("failed to parse delta payload: {}", e))
@@ -298,51 +433,62 @@ impl MultisigClient {
             acc
         };
 
+        self.ensure_safe_to_overwrite_local_state(account_id, updated_account.commitment())
+            .await?;
+
+        // Try to add/update account. If we get a commitment mismatch, reset the miden client
+        // and re-import the account fresh from PSM to recover from locked/stale state.
         match self.add_or_update_account(&updated_account, true).await {
             Ok(()) => {
-                self.cache_account(updated_account);
+                let multisig_account = MultisigAccount::new(updated_account);
+                self.account = Some(multisig_account);
                 Ok(())
             }
-            Err(e) if is_commitment_mismatch_error(&e) => {
-                self.recover_account_from_psm(account_id).await
+            Err(e)
+                if e.to_string()
+                    .contains("doesn't match the imported account commitment") =>
+            {
+                // The miden-client store has the account in a stale/locked state.
+                // Reset the client and re-pull fresh state from PSM.
+                self.reset_miden_client().await?;
+
+                // Re-pull fresh state from PSM
+                let mut psm_client = self.create_authenticated_psm_client().await?;
+                let state_response = psm_client
+                    .get_state(&account_id)
+                    .await
+                    .map_err(|e| MultisigError::PsmServer(format!("failed to get state: {}", e)))?;
+
+                let state_obj = state_response.state.ok_or_else(|| {
+                    MultisigError::PsmServer("no state returned from PSM".to_string())
+                })?;
+
+                let state_value: serde_json::Value = serde_json::from_str(&state_obj.state_json)?;
+
+                let account_base64 = state_value["data"].as_str().ok_or_else(|| {
+                    MultisigError::PsmServer("missing 'data' field in state".to_string())
+                })?;
+
+                let account_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(account_base64)
+                    .map_err(|e| {
+                        MultisigError::MidenClient(format!("failed to decode account: {}", e))
+                    })?;
+
+                let fresh_account = Account::read_from_bytes(&account_bytes).map_err(|e| {
+                    MultisigError::MidenClient(format!("failed to deserialize account: {}", e))
+                })?;
+
+                self.ensure_safe_to_overwrite_local_state(account_id, fresh_account.commitment())
+                    .await?;
+
+                self.add_or_update_account(&fresh_account, true).await?;
+
+                let multisig_account = MultisigAccount::new(fresh_account);
+                self.account = Some(multisig_account);
+                Ok(())
             }
             Err(e) => Err(e),
-        }
-    }
-
-    async fn fetch_account_from_psm(&mut self, account_id: AccountId) -> Result<Account> {
-        let mut psm_client = self.create_authenticated_psm_client().await?;
-        let state_response = psm_client
-            .get_state(&account_id)
-            .await
-            .map_err(|e| MultisigError::PsmServer(format!("failed to get state: {}", e)))?;
-        let state_obj = state_response
-            .state
-            .ok_or_else(|| MultisigError::PsmServer("no state returned from PSM".to_string()))?;
-        decode_account_from_state_json(&state_obj.state_json)
-    }
-
-    fn cache_account(&mut self, account: Account) {
-        let multisig_account = MultisigAccount::new(account, &self.psm_endpoint);
-        self.account = Some(multisig_account);
-    }
-
-    async fn recover_account_from_psm(&mut self, account_id: AccountId) -> Result<()> {
-        self.reset_miden_client().await?;
-        let fresh_account = self.fetch_account_from_psm(account_id).await?;
-        self.add_or_update_account(&fresh_account, true).await?;
-        self.cache_account(fresh_account);
-        Ok(())
-    }
-
-    /// Syncs account state from PSM and updates the local cache.
-    pub async fn sync_account(&mut self) -> Result<()> {
-        if self.account().is_some() {
-            self.sync().await
-        } else {
-            let account_id = self.require_account()?.id();
-            self.pull_account(account_id).await?;
-            Ok(())
         }
     }
 
@@ -351,7 +497,7 @@ impl MultisigClient {
     /// # Example
     ///
     /// ```ignore
-    ///
+    /// // After switching PSM endpoints
     /// client.set_psm_endpoint("http://new-psm:50051");
     /// client.register_on_psm().await?;
     /// ```
@@ -369,21 +515,37 @@ impl MultisigClient {
     /// # Example
     ///
     /// ```ignore
-    ///
+    /// // PSM server moved to new URL (same keys, no on-chain change needed)
     /// client.set_psm_endpoint("http://new-psm:50051", true).await?;
     /// ```
     pub async fn set_psm_endpoint(&mut self, new_endpoint: &str, register: bool) -> Result<()> {
         self.psm_endpoint = new_endpoint.to_string();
-
-        if let Some(account) = self.account.take() {
-            let updated = MultisigAccount::new(account.into_inner(), &self.psm_endpoint);
-            self.account = Some(updated);
-        }
 
         if register {
             self.register_on_psm().await?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(value: u32) -> Word {
+        Word::from([value, 0, 0, 0])
+    }
+
+    #[test]
+    fn ensure_unique_signer_commitments_rejects_duplicates() {
+        let result = MultisigClient::ensure_unique_signer_commitments(&[word(1), word(2), word(1)]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate signer commitment")
+        );
     }
 }

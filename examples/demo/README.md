@@ -2,15 +2,10 @@
 
 Interactive CLI that exercises the `miden-multisig-client` SDK end-to-end: generate keys, create/register multisig accounts, list notes, coordinate proposals, export/import offline files, and execute transactions.
 
-The demo supports both PSM signature schemes:
-- Falcon
-- ECDSA (secp256k1 / keccak)
-
 ## Requirements
 
 - Private State Manager server (default `http://localhost:50051`)
 - Miden node (default `https://rpc.testnet.miden.io:443` for testnet)
-- Workspace dependencies aligned to Miden `0.13.x`
 
 ## Run
 
@@ -18,11 +13,11 @@ The demo supports both PSM signature schemes:
 cargo run -p psm-demo
 ```
 
-At startup you can override the Miden/PSM endpoints and choose your signature scheme (Falcon or ECDSA).
+At startup you can override the Miden/PSM endpoints if needed.
 
 ## Typical Flow
 
-1. Choose signature scheme and generate a keypair (shows your signer commitment).
+1. Generate Falcon keypair (shows your signer commitment).
 2. Create multisig account (choose threshold and enter cosigner commitments).
 3. Register the account on PSM (makes it visible to other cosigners).
 4. Pull/register the account from another terminal and sign proposals.
@@ -34,7 +29,6 @@ All of these steps are surfaced via the interactive menu—run it in multiple te
 ## Tips
 
 - Copy the full commitment hex shown when generating keys; you’ll need it for account creation.
-- All cosigners in a multisig must use commitments produced for the same signature scheme.
 - Ensure the PSM server and Miden node are running before launching the demo.
 - Each run stores its miden-client database under `~/.psm-demo` (configurable via the prompts).
 

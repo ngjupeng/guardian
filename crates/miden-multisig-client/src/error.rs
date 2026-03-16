@@ -61,9 +61,9 @@ pub enum MultisigError {
     #[error("proposal not ready: need {required} signatures, have {collected}")]
     ProposalNotReady { required: usize, collected: usize },
 
-    /// Key manager not configured.
-    #[error("key manager not configured")]
-    NoKeyManager,
+    /// Signer not configured.
+    #[error("signer not configured")]
+    NoSigner,
 
     /// Missing required configuration.
     #[error("missing required configuration: {0}")]
@@ -88,6 +88,10 @@ pub enum MultisigError {
     /// Invalid filter configuration.
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
+
+    /// Transaction type is not supported in offline mode without PSM.
+    #[error("offline mode only supports SwitchPsm transactions, got: {0}")]
+    OfflineUnsupportedTransaction(String),
 }
 
 impl From<private_state_manager_client::ClientError> for MultisigError {

@@ -1,8 +1,9 @@
 import type { MultisigConfig } from '../types.js';
 import { StorageSlot, StorageMap, Word } from '@miden-sdk/miden-sdk';
-import { normalizeHexWord } from '../utils/encoding.js';
+import { ensureHexPrefix } from '../utils/encoding.js';
 import { getProcedureRoot } from '../procedures.js';
 
+// Storage slot names matching the MASM definitions
 const MULTISIG_SLOT_NAMES = {
   THRESHOLD_CONFIG: 'openzeppelin::multisig::threshold_config',
   SIGNER_PUBLIC_KEYS: 'openzeppelin::multisig::signer_public_keys',
@@ -31,18 +32,19 @@ export class StorageLayoutBuilder {
     const signersMap = new StorageMap();
     config.signerCommitments.forEach((commitment, index) => {
       const key = new Word(new BigUint64Array([BigInt(index), 0n, 0n, 0n]));
-      const value = Word.fromHex(normalizeHexWord(commitment));
+      const value = Word.fromHex(ensureHexPrefix(commitment));
       signersMap.insert(key, value);
     });
     const slot1 = StorageSlot.map(MULTISIG_SLOT_NAMES.SIGNER_PUBLIC_KEYS, signersMap);
 
     const slot2 = StorageSlot.map(MULTISIG_SLOT_NAMES.EXECUTED_TRANSACTIONS, new StorageMap());
 
+    // Map entries: PROC_ROOT => [proc_threshold, 0, 0, 0]
+    // Use SDK's Word.fromHex to match how account code procedure roots are represented
     const procThresholdMap = new StorageMap();
     if (config.procedureThresholds) {
-      const signatureScheme = config.signatureScheme ?? 'falcon';
       for (const pt of config.procedureThresholds) {
-        const rootHex = getProcedureRoot(pt.procedure, signatureScheme);
+        const rootHex = getProcedureRoot(pt.procedure);
         const key = Word.fromHex(rootHex);
         const value = new Word(new BigUint64Array([BigInt(pt.threshold), 0n, 0n, 0n]));
         procThresholdMap.insert(key, value);
@@ -60,7 +62,7 @@ export class StorageLayoutBuilder {
 
     const psmKeyMap = new StorageMap();
     const zeroKey = new Word(new BigUint64Array([0n, 0n, 0n, 0n]));
-    const psmKey = Word.fromHex(normalizeHexWord(config.psmCommitment));
+    const psmKey = Word.fromHex(ensureHexPrefix(config.psmCommitment));
     psmKeyMap.insert(zeroKey, psmKey);
     const slot1 = StorageSlot.map(PSM_SLOT_NAMES.PUBLIC_KEY, psmKeyMap);
 

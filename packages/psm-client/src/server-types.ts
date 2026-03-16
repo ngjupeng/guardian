@@ -27,6 +27,7 @@ export type ServerProposalType =
   | 'add_signer'
   | 'remove_signer'
   | 'change_threshold'
+  | 'update_procedure_threshold'
   | 'switch_psm'
   | 'consume_notes'
   | 'p2id'
@@ -35,7 +36,9 @@ export type ServerProposalType =
 export interface ServerProposalMetadata {
   proposal_type?: ServerProposalType;
   target_threshold?: number;
+  required_signatures?: number;
   signer_commitments?: string[];
+  target_procedure?: string;
   salt?: string;
   description?: string;
   new_psm_pubkey?: string;

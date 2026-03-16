@@ -17,15 +17,9 @@ export async function createWebClient(rpcUrl = MIDEN_RPC_URL): Promise<WebClient
   return client;
 }
 
-export function initializeSigner(): SignerInfo {
-  const falconSecretKey = AuthSecretKey.rpoFalconWithRNG(undefined);
-  const ecdsaSecretKey = AuthSecretKey.ecdsaWithRNG(undefined);
-  const falconCommitment = falconSecretKey.publicKey().toCommitment().toHex();
-  const ecdsaCommitment = ecdsaSecretKey.publicKey().toCommitment().toHex();
-
-  return {
-    falcon: { commitment: falconCommitment, secretKey: falconSecretKey },
-    ecdsa: { commitment: ecdsaCommitment, secretKey: ecdsaSecretKey },
-    activeScheme: 'falcon',
-  };
+export async function initializeSigner(_webClient: WebClient): Promise<SignerInfo> {
+  const secretKey = AuthSecretKey.rpoFalconWithRNG(undefined);
+  const publicKey = secretKey.publicKey();
+  const commitment = publicKey.toCommitment().toHex();
+  return { commitment, secretKey };
 }

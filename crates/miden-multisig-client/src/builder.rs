@@ -7,6 +7,7 @@ use miden_client::crypto::RpoRandomCoin;
 use miden_client::rpc::{Endpoint, GrpcClient, NodeRpcClient};
 use miden_client::{Client, ExecutionOptions};
 use miden_client_sqlite_store::SqliteStore;
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
 use miden_protocol::crypto::dsa::falcon512_rpo::SecretKey;
 use miden_protocol::{MAX_TX_EXECUTION_CYCLES, MIN_TX_EXECUTION_CYCLES};
 
@@ -74,28 +75,25 @@ impl MultisigClientBuilder {
         self
     }
 
-    /// Sets a custom key manager for PSM authentication.
-    pub fn key_manager(mut self, key_manager: impl KeyManager + 'static) -> Self {
-        self.key_manager = Some(Box::new(key_manager));
+    /// Sets a custom key manager for PSM authentication and proposal signing.
+    pub fn key_manager(mut self, key_manager: Box<dyn KeyManager>) -> Self {
+        self.key_manager = Some(key_manager);
         self
     }
 
-    /// Uses a PsmKeyStore with the given secret key.
+    /// Uses a FalconKeyStore with the given secret key.
     pub fn with_secret_key(mut self, secret_key: SecretKey) -> Self {
         self.key_manager = Some(Box::new(PsmKeyStore::new(secret_key)));
         self
     }
 
     /// Uses an ECDSA key store with the given secret key.
-    pub fn with_ecdsa_secret_key(
-        mut self,
-        secret_key: miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey,
-    ) -> Self {
+    pub fn with_ecdsa_secret_key(mut self, secret_key: EcdsaSecretKey) -> Self {
         self.key_manager = Some(Box::new(EcdsaPsmKeyStore::new(secret_key)));
         self
     }
 
-    /// Generates a new random Falcon key for PSM authentication.
+    /// Generates a new random key for PSM authentication.
     pub fn generate_key(mut self) -> Self {
         self.key_manager = Some(Box::new(PsmKeyStore::generate()));
         self
@@ -121,8 +119,9 @@ impl MultisigClientBuilder {
             .account_dir
             .ok_or_else(|| MultisigError::MissingConfig("account_dir".to_string()))?;
 
-        let key_manager = self.key_manager.ok_or(MultisigError::NoKeyManager)?;
+        let key_manager = self.key_manager.ok_or(MultisigError::NoSigner)?;
 
+        // Ensure account directory exists
         std::fs::create_dir_all(&account_dir).map_err(|e| {
             MultisigError::MidenClient(format!("failed to create account dir: {}", e))
         })?;

@@ -38,9 +38,11 @@ pub async fn configure_account(
         );
         PsmError::StorageError(format!("Failed to check existing account: {e}"))
     })?;
+    let scheme = params.auth.scheme();
 
     let commitment = {
         let client = state.network_client.lock().await;
+        let expected_psm_commitment = state.ack.commitment(&scheme);
 
         // Validates that the credential is valid for the account state.
         client
@@ -52,6 +54,18 @@ pub async fn configure_account(
                     "Failed to validate credential"
                 );
                 PsmError::NetworkError(format!("Failed to validate credential: {e}"))
+            })?;
+
+        client
+            .validate_psm_commitment(&params.initial_state, &expected_psm_commitment)
+            .map_err(|e| {
+                tracing::error!(
+                    account_id = %params.account_id,
+                    expected_psm_commitment = %expected_psm_commitment,
+                    error = %e,
+                    "Unauthorized account configuration: invalid PSM public key binding"
+                );
+                PsmError::AuthorizationFailed(format!("Unauthorized account configuration: {e}"))
             })?;
 
         // Verifies the credential authorization.
@@ -84,7 +98,7 @@ pub async fn configure_account(
         commitment,
         created_at: created_at.clone(),
         updated_at: now.clone(),
-        auth_scheme: String::new(),
+        auth_scheme: scheme.to_string(),
     };
 
     state
@@ -101,7 +115,6 @@ pub async fn configure_account(
         })?;
 
     // Create and store metadata (preserving created_at and replay protection on reconfigure)
-    let scheme = params.auth.scheme();
     let metadata_entry = AccountMetadata {
         account_id: params.account_id.clone(),
         auth: params.auth,
@@ -297,5 +310,52 @@ mod tests {
             PsmError::NetworkError(_) => {}
             e => panic!("Expected NetworkError, got: {:?}", e),
         }
+    }
+
+    #[tokio::test]
+    async fn test_configure_account_unauthorized_psm_commitment() {
+        use crate::testing::helpers::generate_falcon_signature;
+
+        let account_id_hex = "0x069cde0ebf59f29063051ad8a3d32d";
+        let (pubkey_hex, commitment_hex, signature_hex, timestamp) =
+            generate_falcon_signature(account_id_hex);
+
+        let network_client = MockNetworkClient::new()
+            .with_validate_credential(Ok(()))
+            .with_validate_psm_commitment(Err(
+                "OpenZeppelin slot 'openzeppelin::psm::public_key' mismatch".to_string(),
+            ));
+
+        let storage_backend = MockStorageBackend::new();
+        let metadata_store = MockMetadataStore::new().with_get(Ok(None));
+
+        let state = create_test_app_state(network_client, storage_backend.clone(), metadata_store);
+
+        let credential = Credentials::signature(pubkey_hex.clone(), signature_hex, timestamp);
+
+        let params = ConfigureAccountParams {
+            account_id: account_id_hex.to_string(),
+            auth: Auth::MidenFalconRpo {
+                cosigner_commitments: vec![commitment_hex],
+            },
+            initial_state: serde_json::json!({"balance": 100}),
+            credential,
+        };
+
+        let result = configure_account(&state, params).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PsmError::AuthorizationFailed(msg) => {
+                assert!(msg.contains("Unauthorized account configuration"));
+                assert!(msg.contains("openzeppelin::psm::public_key"));
+            }
+            e => panic!("Expected AuthorizationFailed, got: {:?}", e),
+        }
+
+        assert!(
+            storage_backend.get_submit_state_calls().is_empty(),
+            "state should not be persisted on unauthorized configuration"
+        );
     }
 }

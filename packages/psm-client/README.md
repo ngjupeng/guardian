@@ -21,11 +21,8 @@ const client = new PsmHttpClient('http://localhost:3000');
 ### Get Server Public Key (Unauthenticated)
 
 ```typescript
-// Default (Falcon)
-const { commitment, pubkey } = await client.getPubkey();
-
-// ECDSA
-const { commitment, pubkey } = await client.getPubkey('ecdsa');
+const pubkey = await client.getPubkey();
+console.log('PSM pubkey:', pubkey);
 ```
 
 ### Set Signer for Authenticated Requests
@@ -33,14 +30,18 @@ const { commitment, pubkey } = await client.getPubkey('ecdsa');
 All endpoints except `getPubkey()` require authentication. You must provide a signer that implements the `Signer` interface:
 
 ```typescript
-import type { Signer, SignatureScheme } from '@openzeppelin/psm-client';
+import type { Signer, RequestAuthPayload } from '@openzeppelin/psm-client';
 
 const signer: Signer = {
-  commitment: '0x...',
-  publicKey: '0x...',
-  scheme: 'falcon' as SignatureScheme, // 'falcon' or 'ecdsa'
-  signAccountIdWithTimestamp: async (accountId: string, timestamp: number) => '0x...',
-  signCommitment: async (commitmentHex: string) => '0x...',
+  commitment: '0x...', // 64 hex chars
+  publicKey: '0x...',  // Full public key hex
+  // Sign account ID + timestamp + request payload digest
+  signRequest: (accountId: string, timestamp: number, requestPayload: RequestAuthPayload) => {
+    // requestPayload is canonicalized by the client before this call
+    // implement your signing logic here
+    return '0x...';
+  },
+  signCommitment: (commitmentHex: string) => '0x...', // Returns signature hex
 };
 
 client.setSigner(signer);
@@ -73,6 +74,9 @@ console.log('State data:', state.state_json.data);
 ```typescript
 // Get all proposals for an account
 const proposals = await client.getDeltaProposals(accountId);
+
+// Get one proposal by commitment
+const proposal = await client.getDeltaProposal(accountId, '0x...');
 
 // Push a new proposal
 const response = await client.pushDeltaProposal({

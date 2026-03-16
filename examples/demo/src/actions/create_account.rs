@@ -1,7 +1,7 @@
-use miden_multisig_client::commitment_from_hex;
+use miden_multisig_client::{word_from_hex, ProcedureName, ProcedureThreshold};
 use rustyline::DefaultEditor;
 
-use crate::display::{print_section, print_success, print_waiting, shorten_hex, shorten_hex_32};
+use crate::display::{print_section, print_success, print_waiting, shorten_hex};
 use crate::menu::prompt_input;
 use crate::state::SessionState;
 
@@ -23,26 +23,58 @@ pub async fn action_create_account(
         return Err("Number of cosigners must be >= threshold".to_string());
     }
 
+    let mut procedure_thresholds = Vec::new();
+    let use_proc_thresholds = prompt_input(editor, "Configure per-procedure thresholds? [y/N]: ")?;
+    if use_proc_thresholds.to_lowercase() == "y" {
+        println!("\nAvailable procedures:");
+        for procedure in ProcedureName::all() {
+            println!("  - {}", procedure);
+        }
+        println!("Leave procedure name empty to finish.\n");
+
+        loop {
+            let procedure_name = prompt_input(editor, "  Procedure name: ")?;
+            if procedure_name.is_empty() {
+                break;
+            }
+
+            let procedure: ProcedureName = procedure_name
+                .parse()
+                .map_err(|_| format!("Unknown procedure: {}", procedure_name))?;
+
+            if procedure_thresholds
+                .iter()
+                .any(|pt: &ProcedureThreshold| pt.procedure == procedure)
+            {
+                return Err(format!("Duplicate threshold override for {}", procedure));
+            }
+
+            let procedure_threshold: u32 = prompt_input(editor, "  Threshold override: ")?
+                .parse()
+                .map_err(|_| "Invalid threshold override".to_string())?;
+
+            if procedure_threshold == 0 {
+                return Err("Threshold override must be >= 1".to_string());
+            }
+
+            if procedure_threshold as usize > num_cosigners {
+                return Err(format!(
+                    "Threshold override {} exceeds number of signers {}",
+                    procedure_threshold, num_cosigners
+                ));
+            }
+
+            procedure_thresholds.push(ProcedureThreshold::new(procedure, procedure_threshold));
+        }
+    }
+
     let mut cosigner_commitment_hexes = Vec::new();
 
     let user_commitment_hex = state.user_commitment_hex()?;
     cosigner_commitment_hexes.push(user_commitment_hex.clone());
 
-    let user_commitment_display = if state.is_ecdsa() {
-        shorten_hex_32(&user_commitment_hex)
-    } else {
-        shorten_hex(&user_commitment_hex)
-    };
-
-    println!(
-        "\nYour {} commitment: {}",
-        state.signature_scheme_name(),
-        user_commitment_display
-    );
-    if state.is_ecdsa() {
-        println!("Your commitment (full): {}", user_commitment_hex);
-    }
-    println!("\nEnter commitments for other cosigners (must use the same signature scheme):");
+    println!("\nYour commitment: {}", shorten_hex(&user_commitment_hex));
+    println!("\nEnter commitments for other cosigners:");
 
     for i in 1..num_cosigners {
         let commitment = prompt_input(editor, &format!("  Cosigner {} commitment: ", i + 1))?;
@@ -71,7 +103,7 @@ pub async fn action_create_account(
     // Convert hex strings to Words
     let signer_commitments: Vec<_> = cosigner_commitment_hexes
         .iter()
-        .map(|hex| commitment_from_hex(hex))
+        .map(|hex| word_from_hex(hex))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to parse commitment: {}", e))?;
 
@@ -79,7 +111,7 @@ pub async fn action_create_account(
 
     let client = state.get_client_mut()?;
     let account = client
-        .create_account(threshold, signer_commitments)
+        .create_account_with_proc_thresholds(threshold, signer_commitments, procedure_thresholds)
         .await
         .map_err(|e| format!("Failed to create account: {}", e))?;
 

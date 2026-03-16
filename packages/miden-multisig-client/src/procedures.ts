@@ -1,37 +1,61 @@
-import type { SignatureScheme } from '@openzeppelin/psm-client';
-
-export const PROCEDURE_ROOTS_FALCON = {
-  update_signers: '0x53d0ad381a193de0cf6af3730141e498274103dfc3b8c8e7367bd49d4a66c72b',
-  auth_tx: '0x474c613b38001cc36d68557e9d881495d6a461a9027033445c7672c586509026',
-  update_psm: '0xb103236807e5bf09c27efc2c5287ca8b03ab9efc1d852b62ebd31f5f1927ec26',
-  verify_psm: '0x30727fc23c6105a678fea8b4c1920f35fa85c03f16a0cf98372c8f56701f8a87',
+/**
+ * Static mapping of procedure names to their deterministic roots.
+ *
+ * These values use the Miden SDK `Word.toHex()` / `Word.fromHex()` encoding, which is the
+ * representation used by the TypeScript client when writing and reading storage map keys.
+ *
+ * Source of truth:
+ * `cargo run --quiet --example procedure_roots -p miden-multisig-client -- --json`
+ *
+ * Note: the Rust example also prints `rust_hex` values for `procedures.rs`. Those are a different
+ * human-readable encoding and should not be copied into this table.
+ */
+export const PROCEDURE_ROOTS = {
+  update_signers: '0x29d26091f4e8a13727e7937a62ad412a392e984eaa1fcce93439a95ab5e003ee',
+  update_procedure_threshold: '0xcda1f9120a3ab2948d5cdc6b4b2982571c04e3f6af787a6d6b2f88eeedd872d7',
+  auth_tx: '0x611abcd570631ad98842cb6f0ef891fe8f9ee508b3245c55a5531d5a8f7fdca9',
+  update_psm: '0x35498ce6e3bc24ae0e0094dc54a09b8b2bbcbc28607f86ba25684cd4a2d8f55b',
+  verify_psm: '0x2f1b90e9d89f1a541dd8621444edba9d3e0a66ef54147ebf59bf964969b9dfd1',
   send_asset: '0x0e406b067ed2bcd7de745ca6517f519fd1a9be245f913347ac673ca1db30c1d6',
   receive_asset: '0x6f4bdbdc4b13d7ed933d590d88ac9dfb98020c9e917697845b5e169395b76a01',
 } as const;
 
-export const PROCEDURE_ROOTS_ECDSA = {
-  update_signers: '0x930f9ea86d33c7b3b2d23c4e9ac2492add461359344ed25b1acd38f3713dd79c',
-  auth_tx: '0x2bc7664a9dd47b36e7c8b8c3df03412798e4410173f36acfe03d191a38add053',
-  update_psm: '0x26ec27195f1fd3eb622b851dfc9eab038bca87522cfc7ec209bfe507682303b1',
-  verify_psm: '0xbeb9e08a83eca030968f2f137b5673136f21bc16c82fd408c2ce2495ccbdcd15',
-  send_asset: '0xd6c130dba13c67ac4733915f24bea9d19f517f51a65c74ded7bcd27e066b400e',
-  receive_asset: '0x016ab79593165e5b849776919e0c0298fb9dac880d593d93edd7134bdcdb4b6f',
-} as const;
+/**
+ * Valid procedure names that can be used for threshold overrides.
+ */
+export type ProcedureName = keyof typeof PROCEDURE_ROOTS;
 
-export const PROCEDURE_ROOTS = PROCEDURE_ROOTS_FALCON;
-
-export type ProcedureName = keyof typeof PROCEDURE_ROOTS_FALCON;
-
-export function getProcedureRoot(name: ProcedureName, scheme: SignatureScheme = 'falcon'): string {
-  const roots = scheme === 'ecdsa' ? PROCEDURE_ROOTS_ECDSA : PROCEDURE_ROOTS_FALCON;
-  return roots[name];
+/**
+ * Get the procedure root for a given procedure name.
+ *
+ * @param name - The procedure name
+ * @returns The procedure root as a hex string in SDK `Word.toHex()` format
+ *
+ * @example
+ * ```typescript
+ * const root = getProcedureRoot('send_asset');
+ * // '0x0e406b067ed2bcd7de745ca6517f519fd1a9be245f913347ac673ca1db30c1d6'
+ * ```
+ */
+export function getProcedureRoot(name: ProcedureName): string {
+  return PROCEDURE_ROOTS[name];
 }
 
+/**
+ * Check if a string is a valid procedure name.
+ *
+ * @param name - The string to check
+ * @returns true if the string is a valid procedure name
+ */
 export function isProcedureName(name: string): name is ProcedureName {
-  return name in PROCEDURE_ROOTS_FALCON;
+  return name in PROCEDURE_ROOTS;
 }
 
-export function getProcedureNames(scheme: SignatureScheme = 'falcon'): ProcedureName[] {
-  const roots = scheme === 'ecdsa' ? PROCEDURE_ROOTS_ECDSA : PROCEDURE_ROOTS_FALCON;
-  return Object.keys(roots) as ProcedureName[];
+/**
+ * Get all available procedure names.
+ *
+ * @returns Array of all valid procedure names
+ */
+export function getProcedureNames(): ProcedureName[] {
+  return Object.keys(PROCEDURE_ROOTS) as ProcedureName[];
 }

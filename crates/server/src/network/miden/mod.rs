@@ -1,18 +1,15 @@
 pub mod account_inspector;
 
 use crate::metadata::auth::{Auth, Credentials};
-use crate::network::miden::account_inspector::MidenAccountInspector;
+use crate::network::miden::account_inspector::{MidenAccountInspector, OZ_PSM_PUBLIC_KEY};
 use crate::network::{NetworkClient, NetworkType};
 use async_trait::async_trait;
 use miden_protocol::Word;
 use miden_protocol::account::{Account, AccountId, StorageSlotName};
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak;
-use miden_protocol::crypto::dsa::falcon512_rpo;
 use miden_protocol::transaction::TransactionSummary;
 use miden_protocol::transaction::{InputNote, InputNotes, OutputNote, OutputNotes};
-use miden_protocol::utils::{Deserializable, Serializable};
 use miden_rpc_client::MidenRpcClient;
-use private_state_manager_shared::{FromJson, SignatureScheme, ToJson};
+use private_state_manager_shared::{FromJson, ToJson};
 
 /// Miden network client for fetching on-chain account data
 pub struct MidenNetworkClient {
@@ -48,43 +45,6 @@ impl MidenNetworkClient {
         }
 
         Ok(account)
-    }
-}
-
-/// Resolves raw credential bytes to a commitment hex string.
-///
-/// If the bytes are exactly 32 bytes (a Word commitment), they are returned as-is.
-/// Otherwise, the bytes are deserialized as a full public key and the commitment is computed.
-fn credential_commitment_hex(
-    pubkey_bytes: &[u8],
-    scheme: SignatureScheme,
-) -> Result<String, String> {
-    if pubkey_bytes.len() == 32 {
-        return Ok(format!("0x{}", hex::encode(pubkey_bytes)));
-    }
-
-    match scheme {
-        SignatureScheme::Falcon => {
-            let pubkey = falcon512_rpo::PublicKey::read_from_bytes(pubkey_bytes).map_err(|e| {
-                tracing::error!(error = %e, "Failed to deserialize Falcon credential pubkey");
-                format!("Failed to deserialize credential pubkey: {e}")
-            })?;
-            Ok(format!(
-                "0x{}",
-                hex::encode(pubkey.to_commitment().to_bytes())
-            ))
-        }
-        SignatureScheme::Ecdsa => {
-            let pubkey =
-                ecdsa_k256_keccak::PublicKey::read_from_bytes(pubkey_bytes).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to deserialize ECDSA credential pubkey");
-                    format!("Failed to deserialize credential pubkey: {e}")
-                })?;
-            Ok(format!(
-                "0x{}",
-                hex::encode(pubkey.to_commitment().to_bytes())
-            ))
-        }
     }
 }
 
@@ -375,29 +335,39 @@ impl NetworkClient for MidenNetworkClient {
                 "Invalid credential type".to_string()
             })?;
 
-        let pubkey_bytes = hex::decode(&credential_pubkey_hex[2..]).map_err(|e| {
-            tracing::error!(
-                pubkey = %credential_pubkey_hex,
-                error = %e,
-                "Failed to decode credential pubkey"
-            );
-            format!("Failed to decode credential pubkey: {e}")
-        })?;
-
-        let commitment_hex = credential_commitment_hex(&pubkey_bytes, auth.scheme())?;
+        let commitment_hex = auth.compute_signer_commitment(credential_pubkey_hex)?;
 
         if inspector.pubkey_exists(&commitment_hex) {
             Ok(())
         } else {
-            let all = inspector.extract_all_pubkeys();
             tracing::error!(
                 commitment = %commitment_hex,
-                all_storage = ?all,
                 "Credential public key commitment not found in account storage"
             );
             Err(format!(
                 "Credential public key commitment '{}...' not found in account storage",
                 &commitment_hex[..18]
+            ))
+        }
+    }
+
+    fn validate_psm_commitment(
+        &self,
+        state_json: &serde_json::Value,
+        expected_psm_commitment: &str,
+    ) -> Result<(), String> {
+        let account = Account::from_json(state_json)?;
+        let inspector = MidenAccountInspector::new(&account);
+
+        let actual_psm_commitment = inspector
+            .extract_psm_public_key()
+            .ok_or_else(|| format!("Missing required slot '{OZ_PSM_PUBLIC_KEY}'"))?;
+
+        if actual_psm_commitment == expected_psm_commitment {
+            Ok(())
+        } else {
+            Err(format!(
+                "Slot '{OZ_PSM_PUBLIC_KEY}' mismatch: expected {expected_psm_commitment}, got {actual_psm_commitment}"
             ))
         }
     }
@@ -474,6 +444,55 @@ mod tests {
             result
                 .unwrap_err()
                 .contains("Invalid Miden account ID format")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_psm_commitment_success() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        let account_json: serde_json::Value =
+            serde_json::from_str(crate::testing::fixtures::ACCOUNT_JSON)
+                .expect("Failed to parse account fixture");
+
+        let account =
+            Account::from_json(&account_json).expect("Failed to deserialize fixture account");
+        let inspector = MidenAccountInspector::new(&account);
+        let expected_psm_commitment = inspector
+            .extract_psm_public_key()
+            .expect("Fixture must contain OpenZeppelin PSM public key slot");
+
+        let result = client.validate_psm_commitment(&account_json, &expected_psm_commitment);
+        assert!(result.is_ok(), "Expected matching PSM commitment to pass");
+    }
+
+    #[tokio::test]
+    async fn test_validate_psm_commitment_mismatch() {
+        let network = NetworkType::MidenTestnet;
+        let client = MidenNetworkClient::from_network(network)
+            .await
+            .expect("Failed to create client");
+
+        let account_json: serde_json::Value =
+            serde_json::from_str(crate::testing::fixtures::ACCOUNT_JSON)
+                .expect("Failed to parse account fixture");
+
+        let result = client.validate_psm_commitment(
+            &account_json,
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+        assert!(
+            result.is_err(),
+            "Expected mismatched PSM commitment to fail"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("openzeppelin::psm::public_key"),
+            "Error should mention required OpenZeppelin slot name"
         );
     }
 
@@ -591,106 +610,5 @@ mod tests {
             66,
             "Commitment should be 32 bytes (64 hex chars + 0x prefix)"
         );
-    }
-
-    #[tokio::test]
-    async fn test_merge_deltas_empty() {
-        let client = MidenNetworkClient::from_network(NetworkType::MidenTestnet)
-            .await
-            .expect("Failed to create client");
-
-        let result = client.merge_deltas(vec![]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty delta list"));
-    }
-
-    #[tokio::test]
-    async fn test_merge_deltas_invalid_payload() {
-        let client = MidenNetworkClient::from_network(NetworkType::MidenTestnet)
-            .await
-            .expect("Failed to create client");
-
-        let result = client.merge_deltas(vec![serde_json::json!({"invalid": true})]);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_verify_delta_commitment_mismatch() {
-        let client = MidenNetworkClient::from_network(NetworkType::MidenTestnet)
-            .await
-            .expect("Failed to create client");
-
-        let account_json: serde_json::Value =
-            serde_json::from_str(crate::testing::fixtures::ACCOUNT_JSON)
-                .expect("Failed to parse account fixture");
-
-        let delta_fixture: serde_json::Value =
-            serde_json::from_str(crate::testing::fixtures::DELTA_1_JSON)
-                .expect("Failed to parse delta fixture");
-        let delta_payload = delta_fixture
-            .get("delta_payload")
-            .expect("delta_payload field missing");
-
-        let result = client.verify_delta("0xwrong_commitment", &account_json, delta_payload);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Previous commitment mismatch"));
-    }
-
-    #[tokio::test]
-    async fn test_validate_account_id_invalid() {
-        let client = MidenNetworkClient::from_network(NetworkType::MidenTestnet)
-            .await
-            .expect("Failed to create client");
-
-        let result = client.validate_account_id("not_valid");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid Miden account ID"));
-    }
-
-    #[tokio::test]
-    async fn test_delta_proposal_id() {
-        let client = MidenNetworkClient::from_network(NetworkType::MidenTestnet)
-            .await
-            .expect("Failed to create client");
-
-        let delta_fixture: serde_json::Value =
-            serde_json::from_str(crate::testing::fixtures::DELTA_1_JSON)
-                .expect("Failed to parse delta fixture");
-        let delta_payload = delta_fixture
-            .get("delta_payload")
-            .expect("delta_payload field missing");
-
-        let result = client.delta_proposal_id("any_account", 1, delta_payload);
-        assert!(result.is_ok());
-        let proposal_id = result.unwrap();
-        assert!(proposal_id.starts_with("0x"));
-        assert_eq!(proposal_id.len(), 66); // 0x + 64 hex chars
-    }
-
-    #[test]
-    fn test_credential_commitment_hex_passthrough_32_bytes() {
-        let word_bytes = [0xABu8; 32];
-        let expected = format!("0x{}", hex::encode(&word_bytes));
-
-        let falcon = credential_commitment_hex(&word_bytes, SignatureScheme::Falcon).unwrap();
-        let ecdsa = credential_commitment_hex(&word_bytes, SignatureScheme::Ecdsa).unwrap();
-
-        assert_eq!(falcon, expected);
-        assert_eq!(ecdsa, expected);
-    }
-
-    #[test]
-    fn test_credential_commitment_hex_ecdsa_33_bytes() {
-        use miden_protocol::crypto::dsa::ecdsa_k256_keccak;
-
-        let sk = ecdsa_k256_keccak::SecretKey::new();
-        let pk = sk.public_key();
-        let mut pk_bytes = Vec::new();
-        pk.write_into(&mut pk_bytes);
-        assert_eq!(pk_bytes.len(), 33);
-
-        let result = credential_commitment_hex(&pk_bytes, SignatureScheme::Ecdsa).unwrap();
-        let expected = format!("0x{}", hex::encode(pk.to_commitment().to_bytes()));
-        assert_eq!(result, expected);
     }
 }

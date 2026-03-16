@@ -1,11 +1,12 @@
-use private_state_manager_shared::SignatureScheme;
-
 use crate::delta_object::{DeltaObject, ProposalSignature};
 use crate::metadata::auth::{Auth, ExtractCredentials};
 use crate::services::{
-    self, ConfigureAccountParams, GetDeltaParams, GetStateParams, PushDeltaParams,
+    self, ConfigureAccountParams, GetDeltaParams, GetDeltaProposalParams, GetStateParams,
+    PushDeltaParams,
 };
 use crate::state::AppState;
+use private_state_manager_shared::SignatureScheme;
+use private_state_manager_shared::auth_request_payload::AuthRequestPayload;
 use tonic::{Request, Response, Status};
 
 // Include the generated protobuf code
@@ -32,8 +33,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<ConfigureRequest>,
     ) -> Result<Response<ConfigureResponse>, Status> {
-        // Extract credentials from metadata
-        let credential = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let credential = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
 
         let req = request.into_inner();
 
@@ -77,8 +81,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<PushDeltaRequest>,
     ) -> Result<Response<PushDeltaResponse>, Status> {
-        // Extract authentication data from metadata
-        let auth = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let auth = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
 
         let req = request.into_inner();
 
@@ -124,8 +131,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<GetDeltaRequest>,
     ) -> Result<Response<GetDeltaResponse>, Status> {
-        // Extract authentication data from metadata
-        let auth = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let auth = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
 
         let req = request.into_inner();
 
@@ -154,8 +164,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<GetDeltaSinceRequest>,
     ) -> Result<Response<GetDeltaSinceResponse>, Status> {
-        // Extract authentication data from metadata
-        let auth = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let auth = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
 
         let req = request.into_inner();
 
@@ -184,8 +197,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<GetStateRequest>,
     ) -> Result<Response<GetStateResponse>, Status> {
-        // Extract authentication data from metadata
-        let auth = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let auth = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
 
         let req = request.into_inner();
 
@@ -234,7 +250,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<PushDeltaProposalRequest>,
     ) -> Result<Response<PushDeltaProposalResponse>, Status> {
-        let credentials = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let credentials = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
         let data = request.into_inner();
 
         let params = services::PushDeltaProposalParams {
@@ -265,7 +285,11 @@ impl StateManager for StateManagerService {
         &self,
         request: Request<GetDeltaProposalsRequest>,
     ) -> Result<Response<GetDeltaProposalsResponse>, Status> {
-        let credentials = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let credentials = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
         let data = request.into_inner();
 
         let params = services::GetDeltaProposalsParams {
@@ -287,11 +311,46 @@ impl StateManager for StateManagerService {
         }
     }
 
+    async fn get_delta_proposal(
+        &self,
+        request: Request<GetDeltaProposalRequest>,
+    ) -> Result<Response<GetDeltaProposalResponse>, Status> {
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let credentials = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
+        let data = request.into_inner();
+
+        let params = GetDeltaProposalParams {
+            account_id: data.account_id,
+            commitment: data.commitment,
+            credentials,
+        };
+
+        match services::get_delta_proposal(&self.app_state, params).await {
+            Ok(response) => Ok(Response::new(GetDeltaProposalResponse {
+                success: true,
+                message: "Delta proposal retrieved successfully".to_string(),
+                proposal: Some(delta_to_proto(&response.proposal)),
+            })),
+            Err(e) => Ok(Response::new(GetDeltaProposalResponse {
+                success: false,
+                message: e.to_string(),
+                proposal: None,
+            })),
+        }
+    }
+
     async fn sign_delta_proposal(
         &self,
         request: Request<SignDeltaProposalRequest>,
     ) -> Result<Response<SignDeltaProposalResponse>, Status> {
-        let credentials = request.metadata().extract_credentials()?;
+        let request_payload = AuthRequestPayload::from_protobuf_message(request.get_ref());
+        let credentials = request
+            .metadata()
+            .extract_credentials()?
+            .with_request_payload(request_payload);
         let data = request.into_inner();
 
         let signature = data
@@ -451,7 +510,7 @@ mod tests {
     use crate::metadata::auth::Auth;
     use crate::state_object::StateObject;
     use crate::testing::fixtures;
-    use crate::testing::helpers::{create_test_app_state_with_mocks, generate_falcon_signature};
+    use crate::testing::helpers::{TestSigner, create_test_app_state_with_mocks};
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -507,16 +566,17 @@ mod tests {
         }
     }
 
-    fn create_request_with_auth<T>(
+    fn create_request_with_auth<T: prost::Message>(
         req: T,
-        pubkey: &str,
-        signature: &str,
-        timestamp: i64,
+        signer: &TestSigner,
+        account_id: &str,
     ) -> Request<T> {
+        let request_payload = AuthRequestPayload::from_protobuf_message(&req);
+        let (signature, timestamp) = signer.sign_request(account_id, &request_payload);
         let mut request = Request::new(req);
         request
             .metadata_mut()
-            .insert("x-pubkey", pubkey.parse().unwrap());
+            .insert("x-pubkey", signer.pubkey_hex.parse().unwrap());
         request
             .metadata_mut()
             .insert("x-signature", signature.parse().unwrap());
@@ -549,7 +609,8 @@ mod tests {
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         let account_json: serde_json::Value = serde_json::from_str(fixtures::ACCOUNT_JSON).unwrap();
 
@@ -565,7 +626,7 @@ mod tests {
             initial_state: serde_json::to_string(&account_json).unwrap(),
         };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.configure(request).await.unwrap();
         let inner = response.into_inner();
 
@@ -580,7 +641,8 @@ mod tests {
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         let account_json: serde_json::Value = serde_json::from_str(fixtures::ACCOUNT_JSON).unwrap();
         let delta_fixture: serde_json::Value =
@@ -608,12 +670,17 @@ mod tests {
             nonce: 1,
             delta_payload: serde_json::to_string(&serde_json::json!({
                 "tx_summary": delta_fixture["delta_payload"],
-                "signatures": []
+                "signatures": [],
+                "metadata": {
+                    "proposal_type": "change_threshold",
+                    "target_threshold": 1,
+                    "signer_commitments": [signer.commitment_hex.clone()]
+                }
             }))
             .unwrap(),
         };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.push_delta_proposal(request).await.unwrap();
         let inner = response.into_inner();
 
@@ -629,7 +696,8 @@ mod tests {
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         let account_json: serde_json::Value = serde_json::from_str(fixtures::ACCOUNT_JSON).unwrap();
 
@@ -645,12 +713,20 @@ mod tests {
         )));
 
         let request = state_manager::PushDeltaProposalRequest {
-            account_id,
+            account_id: account_id.clone(),
             nonce: 1,
-            delta_payload: serde_json::to_string(&serde_json::json!({"signatures": []})).unwrap(),
+            delta_payload: serde_json::to_string(&serde_json::json!({
+                "signatures": [],
+                "metadata": {
+                    "proposal_type": "change_threshold",
+                    "target_threshold": 1,
+                    "signer_commitments": [signer.commitment_hex.clone()]
+                }
+            }))
+            .unwrap(),
         };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.push_delta_proposal(request).await.unwrap();
         let inner = response.into_inner();
 
@@ -663,7 +739,8 @@ mod tests {
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         // Need two get responses: one for auth verification, one for update_last_auth_timestamp
         let _metadata = metadata
@@ -688,14 +765,19 @@ mod tests {
             ack_sig: String::new(),
             ack_pubkey: String::new(),
             ack_scheme: String::new(),
-            status: DeltaStatus::pending("2024-11-14T12:00:00Z".to_string(), pubkey.clone()),
+            status: DeltaStatus::pending(
+                "2024-11-14T12:00:00Z".to_string(),
+                signer.pubkey_hex.clone(),
+            ),
         };
 
         let _storage = storage.with_pull_all_delta_proposals(Ok(vec![pending_delta]));
 
-        let request = state_manager::GetDeltaProposalsRequest { account_id };
+        let request = state_manager::GetDeltaProposalsRequest {
+            account_id: account_id.clone(),
+        };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.get_delta_proposals(request).await.unwrap();
         let inner = response.into_inner();
 
@@ -709,7 +791,8 @@ mod tests {
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         // Need two get responses: one for auth verification, one for update_last_auth_timestamp
         let _metadata = metadata
@@ -724,9 +807,11 @@ mod tests {
 
         let _storage = storage.with_pull_all_delta_proposals(Ok(vec![]));
 
-        let request = state_manager::GetDeltaProposalsRequest { account_id };
+        let request = state_manager::GetDeltaProposalsRequest {
+            account_id: account_id.clone(),
+        };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.get_delta_proposals(request).await.unwrap();
         let inner = response.into_inner();
 
@@ -735,12 +820,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_grpc_get_delta_proposal_success() {
+        let (state, storage, _network, metadata) = create_test_state();
+        let service = create_service(state);
+
+        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
+
+        let _metadata = metadata
+            .with_get(Ok(Some(create_account_metadata(
+                account_id.clone(),
+                vec![commitment.clone()],
+            ))))
+            .with_get(Ok(Some(create_account_metadata(
+                account_id.clone(),
+                vec![commitment],
+            ))));
+
+        let delta_fixture: serde_json::Value =
+            serde_json::from_str(fixtures::DELTA_1_JSON).unwrap();
+        let pending_delta = DeltaObject {
+            account_id: account_id.clone(),
+            nonce: 1,
+            prev_commitment: "0x780aa2edb983c1baab3c81edcfe400bc54b516d5cb51f2a7cec4690667329392"
+                .to_string(),
+            new_commitment: None,
+            delta_payload: delta_fixture["delta_payload"].clone(),
+            ack_sig: String::new(),
+            ack_pubkey: String::new(),
+            ack_scheme: String::new(),
+            status: DeltaStatus::pending(
+                "2024-11-14T12:00:00Z".to_string(),
+                signer.pubkey_hex.clone(),
+            ),
+        };
+
+        let _storage = storage.with_pull_delta_proposal(Ok(pending_delta));
+
+        let request = state_manager::GetDeltaProposalRequest {
+            account_id: account_id.clone(),
+            commitment: "0xproposal".to_string(),
+        };
+
+        let request = create_request_with_auth(request, &signer, &account_id);
+        let response = service.get_delta_proposal(request).await.unwrap();
+        let inner = response.into_inner();
+
+        assert!(inner.success);
+        assert!(inner.proposal.is_some());
+        assert_eq!(inner.proposal.unwrap().nonce, 1);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_get_delta_proposal_not_found() {
+        let (state, storage, _network, metadata) = create_test_state();
+        let service = create_service(state);
+
+        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
+
+        let _metadata = metadata
+            .with_get(Ok(Some(create_account_metadata(
+                account_id.clone(),
+                vec![commitment.clone()],
+            ))))
+            .with_get(Ok(Some(create_account_metadata(
+                account_id.clone(),
+                vec![commitment],
+            ))));
+
+        let _storage = storage.with_pull_delta_proposal(Err("Proposal not found".to_string()));
+
+        let request = state_manager::GetDeltaProposalRequest {
+            account_id: account_id.clone(),
+            commitment: "0xmissing".to_string(),
+        };
+
+        let request = create_request_with_auth(request, &signer, &account_id);
+        let response = service.get_delta_proposal(request).await.unwrap();
+        let inner = response.into_inner();
+
+        assert!(!inner.success);
+        assert!(inner.proposal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_grpc_get_delta_proposal_unauthorized() {
+        let (state, _storage, _network, metadata) = create_test_state();
+        let service = create_service(state);
+
+        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let signer = TestSigner::new();
+
+        let _metadata = metadata.with_get(Ok(Some(create_account_metadata(
+            account_id.clone(),
+            vec![signer.commitment_hex.clone()],
+        ))));
+
+        let request = state_manager::GetDeltaProposalRequest {
+            account_id: account_id.clone(),
+            commitment: "0xproposal".to_string(),
+        };
+
+        let mut request = create_request_with_auth(request, &signer, &account_id);
+        request
+            .metadata_mut()
+            .insert("x-signature", "0xdeadbeef".parse().unwrap());
+        let response = service.get_delta_proposal(request).await.unwrap();
+        let inner = response.into_inner();
+
+        assert!(!inner.success);
+        assert!(inner.proposal.is_none());
+        assert!(inner.message.contains("Authentication failed"));
+    }
+
+    #[tokio::test]
     async fn test_grpc_sign_delta_proposal_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
         let service = create_service(state);
 
         let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
-        let (pubkey, commitment, signature, timestamp) = generate_falcon_signature(&account_id);
+        let signer = TestSigner::new();
+        let commitment = signer.commitment_hex.clone();
 
         let _metadata = metadata.with_get(Ok(Some(create_account_metadata(
             account_id.clone(),
@@ -751,7 +954,7 @@ mod tests {
 
         let dummy_sig = format!("0x{}", "a".repeat(666));
         let request = state_manager::SignDeltaProposalRequest {
-            account_id,
+            account_id: account_id.clone(),
             commitment: "nonexistent_proposal".to_string(),
             signature: Some(state_manager::ProposalSignature {
                 scheme: "falcon".to_string(),
@@ -760,7 +963,7 @@ mod tests {
             }),
         };
 
-        let request = create_request_with_auth(request, &pubkey, &signature, timestamp);
+        let request = create_request_with_auth(request, &signer, &account_id);
         let response = service.sign_delta_proposal(request).await.unwrap();
         let inner = response.into_inner();
 

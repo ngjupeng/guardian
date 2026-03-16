@@ -48,7 +48,7 @@ pub fn print_account_info(account: &MultisigAccount) {
     println!("  Nonce:          {}", account.nonce());
 }
 
-pub fn print_storage_overview(account: &MultisigAccount, ecdsa_mode: bool) {
+pub fn print_storage_overview(account: &MultisigAccount, ecdsa_mode: bool, psm_endpoint: &str) {
     print_section("Storage Overview");
 
     match account.threshold() {
@@ -69,7 +69,17 @@ pub fn print_storage_overview(account: &MultisigAccount, ecdsa_mode: bool) {
         println!("    [{}] {}", i, display);
     }
 
-    println!("  PSM Endpoint: {}", account.psm_endpoint());
+    match account.procedure_threshold_overrides() {
+        Ok(overrides) if !overrides.is_empty() => {
+            println!("  Procedure Threshold Overrides:");
+            for (procedure, threshold) in overrides {
+                println!("    - {} => {}", procedure, threshold);
+            }
+        }
+        _ => {}
+    }
+
+    println!("  PSM Endpoint: {}", psm_endpoint);
 }
 
 pub fn print_vault(account: &MultisigAccount) {

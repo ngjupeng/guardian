@@ -1,6 +1,6 @@
 //! Well-known procedure roots for multisig accounts.
 //!
-//! Extracted from: `cargo test --package miden-confidential-contracts log_procedure_roots -- --nocapture`
+//! Extracted from: `cargo run --example procedure_roots -p miden-multisig-client`
 
 use miden_protocol::{Felt, Word};
 
@@ -8,6 +8,7 @@ use miden_protocol::{Felt, Word};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProcedureName {
     UpdateSigners,
+    UpdateProcedureThreshold,
     AuthTx,
     UpdatePsm,
     VerifyPsm,
@@ -22,16 +23,19 @@ impl ProcedureName {
     pub fn root(&self) -> Word {
         match self {
             ProcedureName::UpdateSigners => {
-                word_from_hex("26905086c572765c44337002a961a4d69514889d7e55686dc31c00383b614c47")
+                word_from_hex("ee03e0b55aa93934e9cc1faa4e982e392a41ad627a93e72737a1e8f49160d229")
+            }
+            ProcedureName::UpdateProcedureThreshold => {
+                word_from_hex("d772d8edee882f6b6d7a78aff6e3041c5782294b6bdc5c8d94b23a0a12f9a1cd")
             }
             ProcedureName::AuthTx => {
-                word_from_hex("2bc7664a9dd47b36e7c8b8c3df03412798e4410173f36acfe03d191a38add053")
+                word_from_hex("a9dc7f8f5a1d53a5555c24b308e59e8ffe91f80e6fcb4288d91a6370d5bc1a61")
             }
             ProcedureName::UpdatePsm => {
-                word_from_hex("26ec27195f1fd3eb622b851dfc9eab038bca87522cfc7ec209bfe507682303b1")
+                word_from_hex("5bf5d8a2d44c6825ba867f6028bcbc2b8b9ba054dc94000eae24bce3e68c4935")
             }
             ProcedureName::VerifyPsm => {
-                word_from_hex("878a1f70568f2c3798cfa0163fc085fa350f92c1b4a8fe78a605613cc27f7230")
+                word_from_hex("d1dfb9694996bf59bf7e1454ef660a3e9dbaed441462d81d541a9fd8e9901b2f")
             }
             ProcedureName::SendAsset => {
                 word_from_hex("d6c130dba13c67ac4733915f24bea9d19f517f51a65c74ded7bcd27e066b400e")
@@ -46,6 +50,7 @@ impl ProcedureName {
     pub fn all() -> &'static [ProcedureName] {
         &[
             ProcedureName::UpdateSigners,
+            ProcedureName::UpdateProcedureThreshold,
             ProcedureName::AuthTx,
             ProcedureName::UpdatePsm,
             ProcedureName::VerifyPsm,
@@ -55,10 +60,42 @@ impl ProcedureName {
     }
 }
 
+/// Per-procedure threshold override.
+///
+/// Allows specifying different signature thresholds for specific procedures.
+///
+/// # Example
+///
+/// ```
+/// use miden_multisig_client::{ProcedureThreshold, ProcedureName};
+///
+/// let receive_threshold = ProcedureThreshold::new(ProcedureName::ReceiveAsset, 1);
+/// let config_threshold = ProcedureThreshold::new(ProcedureName::UpdateSigners, 3);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ProcedureThreshold {
+    pub procedure: ProcedureName,
+    pub threshold: u32,
+}
+
+impl ProcedureThreshold {
+    pub fn new(procedure: ProcedureName, threshold: u32) -> Self {
+        Self {
+            procedure,
+            threshold,
+        }
+    }
+
+    pub fn procedure_root(&self) -> Word {
+        self.procedure.root()
+    }
+}
+
 impl std::fmt::Display for ProcedureName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProcedureName::UpdateSigners => write!(f, "update_signers"),
+            ProcedureName::UpdateProcedureThreshold => write!(f, "update_procedure_threshold"),
             ProcedureName::AuthTx => write!(f, "auth_tx"),
             ProcedureName::UpdatePsm => write!(f, "update_psm"),
             ProcedureName::VerifyPsm => write!(f, "verify_psm"),
@@ -74,6 +111,7 @@ impl std::str::FromStr for ProcedureName {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "update_signers" => Ok(ProcedureName::UpdateSigners),
+            "update_procedure_threshold" => Ok(ProcedureName::UpdateProcedureThreshold),
             "auth_tx" => Ok(ProcedureName::AuthTx),
             "update_psm" => Ok(ProcedureName::UpdatePsm),
             "verify_psm" => Ok(ProcedureName::VerifyPsm),
@@ -102,6 +140,19 @@ fn word_from_hex(hex_str: &str) -> Word {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn procedure_threshold_new_creates_correctly() {
+        let threshold = ProcedureThreshold::new(ProcedureName::ReceiveAsset, 1);
+        assert_eq!(threshold.procedure, ProcedureName::ReceiveAsset);
+        assert_eq!(threshold.threshold, 1);
+    }
+
+    #[test]
+    fn procedure_threshold_procedure_root_returns_correct_root() {
+        let threshold = ProcedureThreshold::new(ProcedureName::SendAsset, 2);
+        assert_eq!(threshold.procedure_root(), ProcedureName::SendAsset.root());
+    }
 
     #[test]
     fn procedure_name_round_trip() {

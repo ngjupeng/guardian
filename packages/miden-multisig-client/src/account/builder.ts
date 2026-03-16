@@ -1,3 +1,9 @@
+/**
+ * Account builder for creating multisig accounts with PSM authentication.
+ *
+ * This module provides functionality to create multisig accounts.
+ */
+
 import {
   AccountBuilder,
   AccountComponent,
@@ -7,35 +13,37 @@ import {
 } from '@miden-sdk/miden-sdk';
 import type { MultisigConfig, CreateAccountResult } from '../types.js';
 import { buildMultisigStorageSlots, buildPsmStorageSlots } from './storage.js';
-import { MULTISIG_MASM, MULTISIG_ECDSA_MASM, PSM_MASM, PSM_ECDSA_MASM } from './masm.js';
+import { MULTISIG_MASM, PSM_MASM } from './masm.js';
+import { normalizeSignerCommitment } from '../utils/signature.js';
 
+/**
+ * Creates a multisig account with PSM authentication.
+ *
+ * @param webClient - Initialized Miden WebClient
+ * @param config - Multisig configuration
+ * @returns The created account and seed
+ */
 export async function createMultisigAccount(
   webClient: WebClient,
   config: MultisigConfig
 ): Promise<CreateAccountResult> {
   validateMultisigConfig(config);
-
-  const signatureScheme = config.signatureScheme ?? 'falcon';
   const multisigSlots = buildMultisigStorageSlots(config);
   const psmSlots = buildPsmStorageSlots(config);
-
   const psmBuilder = webClient.createCodeBuilder();
-  const psmMasm = signatureScheme === 'ecdsa' ? PSM_ECDSA_MASM : PSM_MASM;
-  const psmCode = psmBuilder.compileAccountComponentCode(psmMasm);
+  const psmCode = psmBuilder.compileAccountComponentCode(PSM_MASM);
   const psmComponent = AccountComponent
     .compile(psmCode, psmSlots)
     .withSupportsAllTypes();
-
-  const multisigMasm = signatureScheme === 'ecdsa' ? MULTISIG_ECDSA_MASM : MULTISIG_MASM;
-  const psmLibraryPath = signatureScheme === 'ecdsa' ? 'openzeppelin::psm_ecdsa' : 'openzeppelin::psm';
   const multisigBuilder = webClient.createCodeBuilder();
-  const psmLib = multisigBuilder.buildLibrary(psmLibraryPath, psmMasm);
+  const psmLib = multisigBuilder.buildLibrary('openzeppelin::psm', PSM_MASM);
   multisigBuilder.linkStaticLibrary(psmLib);
-  const multisigCode = multisigBuilder.compileAccountComponentCode(multisigMasm);
+  const multisigCode = multisigBuilder.compileAccountComponentCode(MULTISIG_MASM);
   const multisigComponent = AccountComponent
     .compile(multisigCode, multisigSlots)
     .withSupportsAllTypes();
 
+  // Generate random seed
   const seed = new Uint8Array(32);
   crypto.getRandomValues(seed);
 
@@ -60,6 +68,12 @@ export async function createMultisigAccount(
   };
 }
 
+/**
+ * Validates a multisig configuration.
+ *
+ * @param config - The configuration to validate
+ * @throws Error if configuration is invalid
+ */
 export function validateMultisigConfig(config: MultisigConfig): void {
   if (config.threshold === 0) {
     throw new Error('threshold must be greater than 0');
@@ -67,16 +81,16 @@ export function validateMultisigConfig(config: MultisigConfig): void {
   if (config.signerCommitments.length === 0) {
     throw new Error('at least one signer commitment is required');
   }
-  for (const commitment of config.signerCommitments) {
-    const stripped = commitment.startsWith('0x') || commitment.startsWith('0X')
-      ? commitment.slice(2)
-      : commitment;
-    if (stripped.length > 64) {
-      throw new Error(
-        `signerCommitments must be 32-byte commitment hex (64 chars), got ${stripped.length} chars`
-      );
+
+  const signerCommitments = new Set<string>();
+  for (const signerCommitment of config.signerCommitments) {
+    const normalizedCommitment = normalizeSignerCommitment(signerCommitment);
+    if (signerCommitments.has(normalizedCommitment)) {
+      throw new Error(`duplicate signer commitment: ${normalizedCommitment}`);
     }
+    signerCommitments.add(normalizedCommitment);
   }
+
   if (config.threshold > config.signerCommitments.length) {
     throw new Error(
       `threshold (${config.threshold}) cannot exceed number of signers (${config.signerCommitments.length})`
@@ -86,6 +100,7 @@ export function validateMultisigConfig(config: MultisigConfig): void {
     throw new Error('PSM commitment is required');
   }
 
+  // Validate procedure thresholds if provided
   if (config.procedureThresholds) {
     const seen = new Set<string>();
     for (const pt of config.procedureThresholds) {

@@ -3,7 +3,7 @@ use crate::testing::helpers::{
 };
 
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
 use serde_json::json;
@@ -16,11 +16,10 @@ async fn test_push_delta_proposal_success() {
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let signer = TestSigner::new();
-    let (signature_hex, timestamp) = signer.sign(&account_id_hex);
 
     // Configure account
     let configure_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "auth": {
             "MidenFalconRpo": {
                 "cosigner_commitments": [signer.commitment_hex.clone()]
@@ -28,6 +27,7 @@ async fn test_push_delta_proposal_success() {
         },
         "initial_state": initial_state
     });
+    let (signature_hex, timestamp) = signer.sign_json_payload(&account_id_hex, &configure_body);
 
     let configure_request = Request::builder()
         .uri("/configure")
@@ -44,16 +44,21 @@ async fn test_push_delta_proposal_success() {
     assert_eq!(configure_response.status(), StatusCode::OK);
 
     // Push delta proposal
-    let (signature_hex_2, timestamp_2) = signer.sign(&account_id_hex);
     let delta_1 = load_fixture_delta(1);
     let proposal_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "nonce": 1,
         "delta_payload": {
             "tx_summary": delta_1["delta_payload"],
-            "signatures": []
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "change_threshold",
+                "target_threshold": 1,
+                "signer_commitments": [signer.commitment_hex.clone()]
+            }
         }
     });
+    let (signature_hex_2, timestamp_2) = signer.sign_json_payload(&account_id_hex, &proposal_body);
 
     let push_proposal_request = Request::builder()
         .uri("/push_delta_proposal")
@@ -82,11 +87,10 @@ async fn test_get_delta_proposals_empty() {
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let signer = TestSigner::new();
-    let (signature_hex, timestamp) = signer.sign(&account_id_hex);
 
     // Configure account
     let configure_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "auth": {
             "MidenFalconRpo": {
                 "cosigner_commitments": [signer.commitment_hex]
@@ -94,6 +98,7 @@ async fn test_get_delta_proposals_empty() {
         },
         "initial_state": initial_state
     });
+    let (signature_hex, timestamp) = signer.sign_json_payload(&account_id_hex, &configure_body);
 
     let configure_request = Request::builder()
         .uri("/configure")
@@ -110,7 +115,8 @@ async fn test_get_delta_proposals_empty() {
     assert_eq!(configure_response.status(), StatusCode::OK);
 
     // Get delta proposals - need fresh signature for new request
-    let (signature_hex_2, timestamp_2) = signer.sign(&account_id_hex);
+    let query_payload = json!({ "account_id": account_id_hex.clone() });
+    let (signature_hex_2, timestamp_2) = signer.sign_json_payload(&account_id_hex, &query_payload);
     let get_proposals_request = Request::builder()
         .uri(format!(
             "/get_delta_proposals?account_id={}",
@@ -136,11 +142,10 @@ async fn test_get_delta_proposals_with_proposals() {
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let signer = TestSigner::new();
-    let (signature_hex, timestamp) = signer.sign(&account_id_hex);
 
     // Configure account
     let configure_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "auth": {
             "MidenFalconRpo": {
                 "cosigner_commitments": [signer.commitment_hex]
@@ -148,6 +153,7 @@ async fn test_get_delta_proposals_with_proposals() {
         },
         "initial_state": initial_state
     });
+    let (signature_hex, timestamp) = signer.sign_json_payload(&account_id_hex, &configure_body);
 
     let configure_request = Request::builder()
         .uri("/configure")
@@ -163,16 +169,21 @@ async fn test_get_delta_proposals_with_proposals() {
     app_clone.call(configure_request).await.unwrap();
 
     // Push first proposal - need fresh signature
-    let (signature_hex_2, timestamp_2) = signer.sign(&account_id_hex);
     let delta_1 = load_fixture_delta(1);
     let proposal_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "nonce": 1,
         "delta_payload": {
             "tx_summary": delta_1["delta_payload"],
-            "signatures": []
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "change_threshold",
+                "target_threshold": 1,
+                "signer_commitments": [signer.commitment_hex.clone()]
+            }
         }
     });
+    let (signature_hex_2, timestamp_2) = signer.sign_json_payload(&account_id_hex, &proposal_body);
 
     let push_proposal_request = Request::builder()
         .uri("/push_delta_proposal")
@@ -188,7 +199,8 @@ async fn test_get_delta_proposals_with_proposals() {
     app_clone.call(push_proposal_request).await.unwrap();
 
     // Get delta proposals - need fresh signature
-    let (signature_hex_3, timestamp_3) = signer.sign(&account_id_hex);
+    let query_payload = json!({ "account_id": account_id_hex.clone() });
+    let (signature_hex_3, timestamp_3) = signer.sign_json_payload(&account_id_hex, &query_payload);
     let get_proposals_request = Request::builder()
         .uri(format!(
             "/get_delta_proposals?account_id={}",
@@ -208,17 +220,15 @@ async fn test_get_delta_proposals_with_proposals() {
 }
 
 #[tokio::test]
-async fn test_sign_delta_proposal_not_found() {
+async fn test_get_delta_proposal_by_commitment() {
     let state = create_test_app_state().await;
     let app = create_router(state);
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let signer = TestSigner::new();
-    let (signer_signature, signer_timestamp) = signer.sign(&account_id_hex);
 
-    // Configure account
     let configure_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "auth": {
             "MidenFalconRpo": {
                 "cosigner_commitments": [signer.commitment_hex]
@@ -226,6 +236,95 @@ async fn test_sign_delta_proposal_not_found() {
         },
         "initial_state": initial_state
     });
+    let (signature_hex, timestamp) = signer.sign_json_payload(&account_id_hex, &configure_body);
+
+    let configure_request = Request::builder()
+        .uri("/configure")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-pubkey", &signer.pubkey_hex)
+        .header("x-signature", &signature_hex)
+        .header("x-timestamp", timestamp.to_string())
+        .body(Body::from(serde_json::to_string(&configure_body).unwrap()))
+        .unwrap();
+
+    let mut app_clone = app.clone();
+    app_clone.call(configure_request).await.unwrap();
+
+    let delta_1 = load_fixture_delta(1);
+    let proposal_body = json!({
+        "account_id": account_id_hex.clone(),
+        "nonce": 1,
+        "delta_payload": {
+            "tx_summary": delta_1["delta_payload"],
+            "signatures": [],
+            "metadata": { "proposal_type": "change_threshold", "target_threshold": 2, "signer_commitments": [] }
+        }
+    });
+    let (signature_hex_2, timestamp_2) = signer.sign_json_payload(&account_id_hex, &proposal_body);
+
+    let push_proposal_request = Request::builder()
+        .uri("/push_delta_proposal")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-pubkey", &signer.pubkey_hex)
+        .header("x-signature", &signature_hex_2)
+        .header("x-timestamp", timestamp_2.to_string())
+        .body(Body::from(serde_json::to_string(&proposal_body).unwrap()))
+        .unwrap();
+
+    let mut app_clone = app.clone();
+    let push_response = app_clone.call(push_proposal_request).await.unwrap();
+    assert_eq!(push_response.status(), StatusCode::OK);
+    let push_body = to_bytes(push_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let push_json: serde_json::Value = serde_json::from_slice(&push_body).unwrap();
+    let commitment = push_json["commitment"].as_str().unwrap().to_string();
+
+    let query_payload = json!({
+        "account_id": account_id_hex.clone(),
+        "commitment": commitment.clone(),
+    });
+    let (signature_hex_3, timestamp_3) = signer.sign_json_payload(&account_id_hex, &query_payload);
+    let get_proposal_request = Request::builder()
+        .uri(format!(
+            "/get_delta_proposal?account_id={}&commitment={}",
+            account_id_hex, commitment
+        ))
+        .method("GET")
+        .header("x-pubkey", &signer.pubkey_hex)
+        .header("x-signature", &signature_hex_3)
+        .header("x-timestamp", timestamp_3.to_string())
+        .body(Body::empty())
+        .unwrap();
+
+    let mut app_clone = app.clone();
+    let get_response = app_clone.call(get_proposal_request).await.unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_sign_delta_proposal_not_found() {
+    let state = create_test_app_state().await;
+    let app = create_router(state);
+
+    let (_account_id, account_id_hex, initial_state) = load_fixture_account();
+    let signer = TestSigner::new();
+
+    // Configure account
+    let configure_body = json!({
+        "account_id": account_id_hex.clone(),
+        "auth": {
+            "MidenFalconRpo": {
+                "cosigner_commitments": [signer.commitment_hex]
+            }
+        },
+        "initial_state": initial_state
+    });
+    let (signer_signature, signer_timestamp) =
+        signer.sign_json_payload(&account_id_hex, &configure_body);
 
     let configure_request = Request::builder()
         .uri("/configure")
@@ -241,16 +340,17 @@ async fn test_sign_delta_proposal_not_found() {
     app_clone.call(configure_request).await.unwrap();
 
     // Try to sign nonexistent proposal - need fresh signature
-    let (signer_signature_2, signer_timestamp_2) = signer.sign(&account_id_hex);
     let dummy_sig = format!("0x{}", "a".repeat(666));
     let sign_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "commitment": "nonexistent_proposal",
         "signature": {
             "scheme": "falcon",
             "signature": dummy_sig
         }
     });
+    let (signer_signature_2, signer_timestamp_2) =
+        signer.sign_json_payload(&account_id_hex, &sign_body);
 
     let sign_proposal_request = Request::builder()
         .uri("/sign_delta_proposal")
@@ -279,13 +379,11 @@ async fn test_push_delta_proposal_unauthorized() {
 
     let (_account_id, account_id_hex, initial_state) = load_fixture_account();
     let authorized_signer = TestSigner::new();
-    let (authorized_sig, authorized_ts) = authorized_signer.sign(&account_id_hex);
     let unauthorized_signer = TestSigner::new();
-    let (unauthorized_sig, unauthorized_ts) = unauthorized_signer.sign(&account_id_hex);
 
     // Configure account with only authorized commitment
     let configure_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "auth": {
             "MidenFalconRpo": {
                 "cosigner_commitments": [authorized_signer.commitment_hex]
@@ -293,6 +391,8 @@ async fn test_push_delta_proposal_unauthorized() {
         },
         "initial_state": initial_state
     });
+    let (authorized_sig, authorized_ts) =
+        authorized_signer.sign_json_payload(&account_id_hex, &configure_body);
 
     let configure_request = Request::builder()
         .uri("/configure")
@@ -310,13 +410,20 @@ async fn test_push_delta_proposal_unauthorized() {
     // Try to push proposal with unauthorized credentials
     let delta_1 = load_fixture_delta(1);
     let proposal_body = json!({
-        "account_id": account_id_hex,
+        "account_id": account_id_hex.clone(),
         "nonce": 1,
         "delta_payload": {
             "tx_summary": delta_1["delta_payload"],
-            "signatures": []
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "change_threshold",
+                "target_threshold": 1,
+                "signer_commitments": [unauthorized_signer.commitment_hex.clone()]
+            }
         }
     });
+    let (unauthorized_sig, unauthorized_ts) =
+        unauthorized_signer.sign_json_payload(&account_id_hex, &proposal_body);
 
     let push_proposal_request = Request::builder()
         .uri("/push_delta_proposal")

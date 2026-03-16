@@ -13,6 +13,7 @@ import {
   buildConsumeNotesTransactionRequest,
   buildP2idTransactionRequest,
   buildUpdatePsmTransactionRequest,
+  buildUpdateProcedureThresholdTransactionRequest,
   buildUpdateSignersTransactionRequest,
 } from '../../transaction.js';
 import { base64ToUint8Array, normalizeHexWord } from '../../utils/encoding.js';
@@ -214,14 +215,17 @@ function buildCosignerAdviceMap(
     );
     const signature = Signature.deserialize(sigBytes);
     const txCommitment = Word.fromHex(normalizeHexWord(txCommitmentHex));
-    const isEcdsa =
-      cosignerSig.signature.scheme === 'ecdsa' && cosignerSig.signature.publicKey;
+    const ecdsaPublicKey =
+      cosignerSig.signature.scheme === 'ecdsa'
+        ? cosignerSig.signature.publicKey
+        : undefined;
+    const isEcdsa = cosignerSig.signature.scheme === 'ecdsa' && Boolean(ecdsaPublicKey);
 
     const { key, values } = buildSignatureAdviceEntry(
       signerCommitment,
       txCommitment,
       signature,
-      isEcdsa ? cosignerSig.signature.publicKey : undefined,
+      ecdsaPublicKey,
       isEcdsa ? cosignerSig.signature.signature : undefined,
     );
     adviceMap.insert(key, new FeltArray(values));
@@ -308,6 +312,19 @@ async function buildFinalRequest(
       const { request } = await buildUpdatePsmTransactionRequest(
         params.webClient,
         metadata.newPsmPubkey,
+        {
+          salt: normalizedSalt,
+          signatureAdviceMap: adviceMap,
+          signatureScheme: params.signatureScheme,
+        },
+      );
+      return request;
+    }
+    case 'update_procedure_threshold': {
+      const { request } = await buildUpdateProcedureThresholdTransactionRequest(
+        params.webClient,
+        metadata.targetProcedure,
+        metadata.targetThreshold,
         {
           salt: normalizedSalt,
           signatureAdviceMap: adviceMap,

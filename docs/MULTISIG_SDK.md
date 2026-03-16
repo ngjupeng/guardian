@@ -48,7 +48,10 @@ import { MultisigClient, FalconSigner } from '@openzeppelin/miden-multisig-clien
 const midenClient = await WebClient.createClient('https://rpc.testnet.miden.io:443');
 const secretKey = AuthSecretKey.rpoFalconWithRNG(undefined);
 const signer = new FalconSigner(secretKey);
-const client = new MultisigClient(midenClient, { psmEndpoint: 'http://localhost:3000' });
+const client = new MultisigClient(midenClient, {
+  psmEndpoint: 'http://localhost:3000',
+  midenRpcEndpoint: 'https://rpc.testnet.miden.io:443',
+});
 
 // 2. Get PSM server public key
 const psmCommitment = await client.psmClient.getPubkey();
@@ -215,7 +218,8 @@ const signer = new FalconSigner(secretKey);
 
 // Initialize multisig client
 const client = new MultisigClient(webClient, {
-  psmEndpoint: 'http://localhost:3000'
+  psmEndpoint: 'http://localhost:3000',
+  midenRpcEndpoint: 'https://rpc.testnet.miden.io:443',
 });
 ```
 
@@ -403,7 +407,7 @@ await multisig.executeProposal(signedProposal.id);
 |-----------------|-------------|
 | `commitment` | Public key commitment (hex) |
 | `publicKey` | Serialized public key (hex) |
-| `signAccountIdWithTimestamp(id, timestamp)` | Sign account ID with timestamp (ms) for auth |
+| `signRequest(id, timestamp, requestPayload)` | Sign account ID + timestamp + request payload digest for auth |
 | `signCommitment(hex)` | Sign commitment/word |
 
 #### AccountInspector
@@ -531,10 +535,11 @@ let proposals = client.list_proposals().await?;
 
 for proposal in &proposals {
     match &proposal.status {
-        ProposalStatus::Pending { signatures_collected, signatures_required, signers } => {
+        ProposalStatus::Pending => {
+            let (signatures_collected, signatures_required) = proposal.signature_counts();
             println!("{}: {}/{} signatures",
                 proposal.id, signatures_collected, signatures_required);
-            println!("  Signed by: {:?}", signers);
+            println!("  Signed by: {:?}", proposal.metadata.signers);
         }
         ProposalStatus::Ready => {
             println!("{}: Ready to execute", proposal.id);
@@ -650,7 +655,7 @@ for note in notes {
 
 | Variant | Description |
 |---------|-------------|
-| `Pending { signatures_collected, signatures_required, signers }` | Collecting sigs |
+| `Pending` | Collecting sigs (`proposal.signature_counts()`, `proposal.metadata.signers`) |
 | `Ready` | Threshold met |
 | `Finalized` | Executed |
 
@@ -786,8 +791,9 @@ console.log('Notes consumed, funds now in vault');
   "account_id": "0x7925bdcc9c4df01068e79d4c94beeb",
   "id": "0xabcd1234...",
   "nonce": 5,
-  "transaction_type": "P2ID",
-  "tx_summary": { "...base64 encoded..." },
+  "tx_summary": {
+    "...": "transaction summary JSON"
+  },
   "signatures": [
     {
       "signer_commitment": "0x1234...",
@@ -796,9 +802,10 @@ console.log('Notes consumed, funds now in vault');
   ],
   "signatures_required": 2,
   "metadata": {
-    "recipient_id": "0x...",
-    "faucet_id": "0x...",
-    "amount": "1000"
+    "proposal_type": "add_signer",
+    "salt_hex": "0x...",
+    "new_threshold": 2,
+    "signer_commitments_hex": ["0x...", "0x..."]
   }
 }
 ```

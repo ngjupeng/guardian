@@ -31,6 +31,8 @@ function getProposalTypeLabel(type?: ProposalType): string {
       return 'Remove Signer';
     case 'change_threshold':
       return 'Change Threshold';
+    case 'update_procedure_threshold':
+      return 'Update Procedure Threshold';
     case 'switch_psm':
       return 'Switch PSM';
     case 'consume_notes':
@@ -49,6 +51,8 @@ function getProposalTypeVariant(type?: ProposalType): 'default' | 'secondary' | 
     case 'remove_signer':
       return 'destructive';
     case 'change_threshold':
+      return 'secondary';
+    case 'update_procedure_threshold':
       return 'secondary';
     case 'switch_psm':
       return 'secondary';
@@ -98,18 +102,18 @@ export function ProposalCard({
       )
     : false;
 
-  const canSign = proposal.status.type === 'pending' && !userSigned;
+  const canSign = proposal.status === 'pending' && !userSigned;
   const canExecute =
-    proposal.status.type === 'ready' ||
-    (proposal.status.type === 'pending' && proposal.signatures.length >= effectiveThreshold);
+    proposal.status === 'ready' ||
+    (proposal.status === 'pending' && proposal.signatures.length >= effectiveThreshold);
   const isSigningThis = signingProposal === proposal.id;
   const isExecutingThis = executingProposal === proposal.id;
   const isExternalWallet = walletSource !== 'local';
 
   const statusVariant =
-    proposal.status.type === 'ready'
+    proposal.status === 'ready'
       ? 'default'
-      : proposal.status.type === 'finalized'
+      : proposal.status === 'finalized'
         ? 'secondary'
         : 'outline';
 
@@ -132,7 +136,7 @@ export function ProposalCard({
             </code>
           </div>
           <Badge variant={statusVariant} className="uppercase">
-            {proposal.status.type}
+            {proposal.status}
           </Badge>
         </div>
 
@@ -215,7 +219,7 @@ export function ProposalCard({
           >
             Export
           </Button>
-          {!canSign && !canExecute && proposal.status.type === 'finalized' && (
+          {!canSign && !canExecute && proposal.status === 'finalized' && (
             <span className="text-sm text-muted-foreground italic">Finalized</span>
           )}
         </div>

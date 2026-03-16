@@ -13,6 +13,7 @@ export async function buildConsumeNotesTransactionRequest(
     throw new Error('At least one note ID is required');
   }
 
+  // Fetch full Note objects from the client store
   const noteAndArgsArray = new NoteAndArgsArray();
   for (const noteIdHex of noteIds) {
     const inputNoteRecord = await webClient.getInputNote(noteIdHex);

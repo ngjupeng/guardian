@@ -14,6 +14,7 @@ vi.mock('@miden-sdk/miden-sdk', () => ({
         prefix: () => ({ asInt: () => BigInt(1) }),
         suffix: () => ({ asInt: () => BigInt(2) }),
       }),
+      serialize: () => new Uint8Array([1, 2, 3]),
       storage: vi.fn(),
       vault: vi.fn(),
     })),
@@ -73,11 +74,12 @@ describe('MultisigClient', () => {
     };
 
     mockSigner = {
-      scheme: 'falcon',
       commitment: '0x' + '1'.repeat(64),
       publicKey: '0x' + '2'.repeat(64),
+      scheme: 'falcon',
       signAccountIdWithTimestamp: vi.fn().mockResolvedValue('0x' + 'a'.repeat(128)),
-      signCommitment: vi.fn().mockResolvedValue('0x' + 'b'.repeat(128)),
+      signRequest: vi.fn().mockReturnValue('0x' + 'a'.repeat(128)),
+      signCommitment: vi.fn().mockReturnValue('0x' + 'b'.repeat(128)),
     };
   });
 
@@ -174,40 +176,34 @@ describe('MultisigClient', () => {
         client.load('0xnonexistent', mockSigner)
       ).rejects.toThrow();
     });
-  });
 
-  describe('initialize', () => {
-    it('should fetch PSM pubkey and return commitment', async () => {
+    it('should allow registerOnPsm after load without explicit initial state', async () => {
       const client = new MultisigClient(webClient);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          commitment: '0x' + 'f'.repeat(64),
-          pubkey: '0x' + 'e'.repeat(64),
+          account_id: '0x' + 'd'.repeat(30),
+          commitment: '0x' + 'e'.repeat(64),
+          state_json: { data: 'base64state' },
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-02T00:00:00Z',
         }),
       });
-
-      const result = await client.initialize('falcon');
-
-      expect(result.psmCommitment).toBe('0x' + 'f'.repeat(64));
-      expect(result.psmPublicKey).toBe('0x' + 'e'.repeat(64));
-    });
-
-    it('should work without specifying scheme', async () => {
-      const client = new MultisigClient(webClient);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          commitment: '0x' + 'f'.repeat(64),
+          success: true,
+          message: 'Account configured',
+          ack_pubkey: '0x' + 'f'.repeat(64),
         }),
       });
 
-      const result = await client.initialize();
+      const accountId = '0x' + 'd'.repeat(30);
+      const multisig = await client.load(accountId, mockSigner);
 
-      expect(result.psmCommitment).toBe('0x' + 'f'.repeat(64));
-      expect(result.psmPublicKey).toBeUndefined();
+      await expect(multisig.registerOnPsm()).resolves.toBeUndefined();
     });
   });
 });

@@ -9,7 +9,7 @@ use rustyline::DefaultEditor;
 
 use actions::{
     action_create_account, action_list_notes, action_proposal_management, action_show_account,
-    action_show_status, action_sync_account,
+    action_show_status, action_sync_account, action_verify_state_commitment,
 };
 use display::{
     print_banner, print_error, print_full_hex, print_section, print_success, print_waiting,
@@ -113,14 +113,11 @@ async fn startup(editor: &mut DefaultEditor) -> Result<SessionState, String> {
 
     print_success("Client initialized!");
     println!("  Signature scheme: {}", state.signature_scheme_name());
-    match signature_scheme {
-        SignatureScheme::Ecdsa => {
-            println!("  Your commitment: {}", shorten_hex_32(&commitment_hex));
-            print_full_hex("  Your commitment (full)", &commitment_hex);
-        }
-        SignatureScheme::Falcon => {
-            print_full_hex("  Your commitment", &commitment_hex);
-        }
+    if state.is_ecdsa() {
+        println!("  Your commitment: {}", shorten_hex_32(&commitment_hex));
+        print_full_hex("  Your commitment (full)", &commitment_hex);
+    } else {
+        print_full_hex("  Your commitment", &commitment_hex);
     }
     println!("\n  Share this commitment with other cosigners to be added to multisig accounts.");
 
@@ -159,6 +156,7 @@ async fn handle_action(
     match action {
         MenuAction::CreateAccount => action_create_account(state, editor).await,
         MenuAction::SyncAccount => action_sync_account(state, editor).await,
+        MenuAction::VerifyStateCommitment => action_verify_state_commitment(state).await,
         MenuAction::ListNotes => action_list_notes(state).await,
         MenuAction::ProposalManagement => action_proposal_management(state, editor).await,
         MenuAction::ShowAccount => action_show_account(state).await,

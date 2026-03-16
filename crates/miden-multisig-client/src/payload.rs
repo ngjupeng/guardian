@@ -5,10 +5,12 @@ use private_state_manager_shared::{DeltaSignature, ProposalSignature, ToJson};
 use serde::{Deserialize, Serialize};
 
 use crate::keystore::KeyManager;
+use crate::procedures::ProcedureName;
 
 /// Metadata for multisig transaction proposals.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ProposalMetadataPayload {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub proposal_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -31,6 +33,9 @@ pub struct ProposalMetadataPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_signatures: Option<u64>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_ids: Vec<String>,
 
@@ -39,6 +44,9 @@ pub struct ProposalMetadataPayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_psm_endpoint: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_procedure: Option<String>,
 }
 
 /// Complete payload for a multisig transaction proposal.
@@ -173,6 +181,31 @@ impl ProposalPayload {
             salt: Some(salt),
             ..Default::default()
         });
+        self
+    }
+
+    /// Sets the metadata for procedure-threshold override updates.
+    pub fn with_procedure_threshold_metadata(
+        mut self,
+        procedure: ProcedureName,
+        new_threshold: u64,
+        salt: String,
+    ) -> Self {
+        self.metadata = Some(ProposalMetadataPayload {
+            proposal_type: "update_procedure_threshold".to_string(),
+            target_threshold: Some(new_threshold),
+            target_procedure: Some(procedure.to_string()),
+            salt: Some(salt),
+            ..Default::default()
+        });
+        self
+    }
+
+    pub fn with_required_signatures(mut self, required_signatures: usize) -> Self {
+        let metadata = self
+            .metadata
+            .get_or_insert_with(ProposalMetadataPayload::default);
+        metadata.required_signatures = Some(required_signatures as u64);
         self
     }
 
