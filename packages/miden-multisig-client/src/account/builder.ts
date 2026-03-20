@@ -64,9 +64,11 @@ export async function createMultisigAccount(
     .compile(authCode, authSlots)
     .withSupportsAllTypes();
 
-  // Generate random seed
-  const seed = new Uint8Array(32);
-  crypto.getRandomValues(seed);
+  let seed = config.seed;
+  // Generate random seed if not provided
+  if (!seed) {
+    seed = crypto.getRandomValues(new Uint8Array(32));
+  }
 
   const storageMode = config.storageMode === 'public'
     ? AccountStorageMode.public()
