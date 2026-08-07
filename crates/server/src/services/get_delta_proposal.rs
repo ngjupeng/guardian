@@ -56,7 +56,6 @@ mod tests {
     use crate::testing::helpers::create_test_app_state_with_mocks;
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     fn create_test_state() -> (
         AppState,
@@ -70,7 +69,7 @@ mod tests {
 
         let state = create_test_app_state_with_mocks(
             Arc::new(storage.clone()),
-            Arc::new(Mutex::new(network.clone())),
+            Arc::new(network.clone()),
             Arc::new(metadata.clone()),
         );
 
@@ -86,10 +85,14 @@ mod tests {
             auth: Auth::MidenFalconRpo {
                 cosigner_commitments,
             },
+            network_config: crate::metadata::NetworkConfig::miden_default(),
             created_at: "2024-11-14T12:00:00Z".to_string(),
             updated_at: "2024-11-14T12:00:00Z".to_string(),
             has_pending_candidate: false,
             last_auth_timestamp: None,
+            paused_at: None,
+            paused_reason: None,
+            released_at: None,
         }
     }
 
@@ -112,13 +115,14 @@ mod tests {
                 proposer_id: commitment.to_string(),
                 cosigner_sigs: vec![],
             },
+            metadata: None,
         }
     }
 
     #[tokio::test]
     async fn get_delta_proposal_returns_pending_proposal() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment = "0xabc".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
@@ -145,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn get_delta_proposal_rejects_non_pending_proposal() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let commitment = "0xabc".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =

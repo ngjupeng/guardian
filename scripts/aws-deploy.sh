@@ -6,13 +6,18 @@ set -euo pipefail
 #
 # Commands:
 #   deploy   - Build/push image and run Terraform apply
+#   plan     - Run Terraform plan without building or applying
+#   build    - Build and push the Docker image to ECR
 #   bootstrap-ack-keys - Create the prod ACK key secrets in Secrets Manager
+#   bootstrap-kms-ecdsa-key - Create the KMS ECDSA ACK signing key + alias (KMS backend)
+#   bootstrap-storage-encryption-key - Create the storage encryption key secret in Secrets Manager
+#   bootstrap-dashboard-cursor-secret - Create the shared dashboard cursor secret in Secrets Manager
 #   status   - Show deployment status
 #   logs     - Tail CloudWatch logs
 #   cleanup  - Remove all AWS resources
 #
 # Options:
-#   --skip-build - Skip Docker build and push (use existing image)
+#   --skip-build - Skip Docker build and push during deploy
 #
 # Optional environment variables:
 #   AWS_REGION            - AWS region (default: us-east-1)
@@ -28,6 +33,18 @@ set -euo pipefail
 #   CLOUDFLARE_PROXIED    - Cloudflare proxied setting (true/false)
 #   ACM_CERTIFICATE_ARN   - ACM certificate ARN for HTTPS
 #   GUARDIAN_NETWORK_TYPE      - Runtime Miden network for the server (default: MidenTestnet)
+#   GUARDIAN_SERVER_FEATURES   - Cargo features for guardian-server Docker build (default: postgres)
+#   GUARDIAN_CORS_ALLOWED_ORIGINS - Comma-separated explicit HTTP origins allowed by credentialed CORS (optional)
+#   GUARDIAN_EVM_CHAIN_CONFIG_FILE - JSON file used to derive EVM chain IDs, RPC URLs, and EntryPoint address (default: config/evm/chains.json)
+#   GUARDIAN_EVM_ALLOWED_CHAIN_IDS - Comma-separated EVM chain IDs allowed by the server; creates a stack Secrets Manager secret (optional)
+#   GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN - Secrets Manager ARN with comma-separated EVM chain IDs (optional)
+#   GUARDIAN_EVM_RPC_URLS - Comma-separated chain_id=url EVM RPC map; creates a stack Secrets Manager secret (optional)
+#   GUARDIAN_EVM_RPC_URLS_SECRET_ARN - Secrets Manager ARN with comma-separated EVM RPC map (optional)
+#   GUARDIAN_EVM_ENTRYPOINT_ADDRESS - Shared EVM EntryPoint address (default: EntryPoint v0.9)
+#   GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON - JSON array of Falcon operator public keys; creates a stack Secrets Manager secret (optional)
+#   GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN - Secrets Manager ARN with dashboard operator public keys JSON (optional)
+#   GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME - Secrets Manager secret name for the storage encryption key document. Setting it enables encryption at rest (prod): the stack wires the IAM grant and GUARDIAN_STORAGE_ENCRYPTION_KEY_SECRET_ID. Unset leaves storage in plaintext. bootstrap-storage-encryption-key defaults to <stack-name>/server/storage-encryption-key (optional)
+#   GUARDIAN_DASHBOARD_CURSOR_SECRET_NAME - Secrets Manager secret name for the shared dashboard cursor key. Prod defaults to <stack-name>/server/dashboard-cursor-secret and requires it to exist
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 SKIP_BUILD=false
@@ -42,7 +59,21 @@ CLOUDFLARE_ZONE_ID="${CLOUDFLARE_ZONE_ID-}"
 CLOUDFLARE_PROXIED="${CLOUDFLARE_PROXIED:-true}"
 ACM_CERTIFICATE_ARN="${ACM_CERTIFICATE_ARN-}"
 GUARDIAN_NETWORK_TYPE="${GUARDIAN_NETWORK_TYPE:-MidenTestnet}"
+GUARDIAN_SERVER_FEATURES="${GUARDIAN_SERVER_FEATURES:-postgres}"
+GUARDIAN_CORS_ALLOWED_ORIGINS="${GUARDIAN_CORS_ALLOWED_ORIGINS:-${TF_VAR_guardian_cors_allowed_origins:-}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_GUARDIAN_EVM_CHAIN_CONFIG_FILE="${SCRIPT_DIR}/../config/evm/chains.json"
+DEFAULT_GUARDIAN_EVM_ENTRYPOINT_ADDRESS="0x433709009b8330fda32311df1c2afa402ed8d009"
+GUARDIAN_EVM_CHAIN_CONFIG_FILE="${GUARDIAN_EVM_CHAIN_CONFIG_FILE:-$DEFAULT_GUARDIAN_EVM_CHAIN_CONFIG_FILE}"
+GUARDIAN_EVM_ALLOWED_CHAIN_IDS="${GUARDIAN_EVM_ALLOWED_CHAIN_IDS:-${TF_VAR_guardian_evm_allowed_chain_ids:-}}"
+GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN="${GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN:-${TF_VAR_guardian_evm_allowed_chain_ids_secret_arn:-}}"
+GUARDIAN_EVM_RPC_URLS="${GUARDIAN_EVM_RPC_URLS:-${TF_VAR_guardian_evm_rpc_urls:-}}"
+GUARDIAN_EVM_RPC_URLS_SECRET_ARN="${GUARDIAN_EVM_RPC_URLS_SECRET_ARN:-${TF_VAR_guardian_evm_rpc_urls_secret_arn:-}}"
+GUARDIAN_EVM_ENTRYPOINT_ADDRESS="${GUARDIAN_EVM_ENTRYPOINT_ADDRESS:-${TF_VAR_guardian_evm_entrypoint_address:-}}"
+GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON="${GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON:-}"
+GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN="${GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN:-${TF_VAR_guardian_operator_public_keys_secret_arn:-}}"
+GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME="${GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME:-${TF_VAR_guardian_storage_encryption_secret_name:-}}"
+GUARDIAN_DASHBOARD_CURSOR_SECRET_NAME="${GUARDIAN_DASHBOARD_CURSOR_SECRET_NAME:-${TF_VAR_guardian_dashboard_cursor_secret_name:-}}"
 TF_DIR="${SCRIPT_DIR}/../infra"
 TF_STATE_PATH_OVERRIDE="${TF_STATE_PATH:-}"
 TF_STATE_BACKUP_PATH_OVERRIDE="${TF_STATE_BACKUP_PATH:-}"
@@ -59,10 +90,113 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+evm_feature_enabled() {
+  local normalized_features="${GUARDIAN_SERVER_FEATURES//[[:space:]]/}"
+  [[ ",${normalized_features}," == *",evm,"* ]]
+}
+
+load_evm_chain_config_file() {
+  if ! evm_feature_enabled; then
+    return 0
+  fi
+
+  local needs_allowed_chain_ids=false
+  local needs_rpc_urls=false
+  local needs_entrypoint_address=false
+
+  if [ -z "$GUARDIAN_EVM_ALLOWED_CHAIN_IDS" ] && [ -z "$GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN" ]; then
+    needs_allowed_chain_ids=true
+  fi
+  if [ -z "$GUARDIAN_EVM_RPC_URLS" ] && [ -z "$GUARDIAN_EVM_RPC_URLS_SECRET_ARN" ]; then
+    needs_rpc_urls=true
+  fi
+  if [ -z "$GUARDIAN_EVM_ENTRYPOINT_ADDRESS" ]; then
+    needs_entrypoint_address=true
+  fi
+
+  if [ "$needs_allowed_chain_ids" = false ] && \
+    [ "$needs_rpc_urls" = false ] && \
+    [ "$needs_entrypoint_address" = false ]; then
+    return 0
+  fi
+
+  if [ ! -f "$GUARDIAN_EVM_CHAIN_CONFIG_FILE" ]; then
+    log_error "EVM chain config file not found: ${GUARDIAN_EVM_CHAIN_CONFIG_FILE}"
+    return 1
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_error "jq is required to read GUARDIAN_EVM_CHAIN_CONFIG_FILE"
+    return 1
+  fi
+
+  if ! jq -e '
+    (.entrypointAddress | type == "string")
+    and (.chains | type == "array" and length > 0)
+    and all(.chains[]; (.chainId | type == "number") and (.chainId > 0) and (.rpcUrl | type == "string") and (.rpcUrl | test("^https?://")))
+  ' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE" >/dev/null; then
+    log_error "Invalid EVM chain config file: ${GUARDIAN_EVM_CHAIN_CONFIG_FILE}"
+    return 1
+  fi
+
+  local chain_count
+  local unique_chain_count
+  chain_count=$(jq '.chains | length' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE")
+  unique_chain_count=$(jq '[.chains[].chainId] | unique | length' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE")
+  if [ "$chain_count" != "$unique_chain_count" ]; then
+    log_error "EVM chain config file has duplicate chainId values: ${GUARDIAN_EVM_CHAIN_CONFIG_FILE}"
+    return 1
+  fi
+
+  if [ "$needs_allowed_chain_ids" = true ]; then
+    GUARDIAN_EVM_ALLOWED_CHAIN_IDS="$(jq -r '[.chains[].chainId] | join(",")' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE")"
+  fi
+  if [ "$needs_rpc_urls" = true ]; then
+    GUARDIAN_EVM_RPC_URLS="$(jq -r '[.chains[] | "\(.chainId)=\(.rpcUrl)"] | join(",")' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE")"
+  fi
+  if [ "$needs_entrypoint_address" = true ]; then
+    GUARDIAN_EVM_ENTRYPOINT_ADDRESS="$(jq -r '.entrypointAddress // empty' "$GUARDIAN_EVM_CHAIN_CONFIG_FILE")"
+  fi
+  if [ -z "$GUARDIAN_EVM_ENTRYPOINT_ADDRESS" ]; then
+    GUARDIAN_EVM_ENTRYPOINT_ADDRESS="$DEFAULT_GUARDIAN_EVM_ENTRYPOINT_ADDRESS"
+  fi
+}
+
 validate_deploy_config() {
   local cloudflare_api_token="${CLOUDFLARE_API_TOKEN:-${TF_VAR_cloudflare_api_token:-}}"
+  local normalized_features="${GUARDIAN_SERVER_FEATURES//[[:space:]]/}"
+
+  load_evm_chain_config_file || return 1
+
   if [ -n "$CLOUDFLARE_ZONE_ID" ] && [ -z "$cloudflare_api_token" ]; then
     log_error "CLOUDFLARE_ZONE_ID is set but CLOUDFLARE_API_TOKEN is empty"
+    return 1
+  fi
+
+  if [[ ",${normalized_features}," != *",postgres,"* ]]; then
+    log_error "GUARDIAN_SERVER_FEATURES must include postgres for AWS deployments"
+    return 1
+  fi
+
+  if [[ ",${normalized_features}," == *",evm,"* ]]; then
+    if [ -z "$GUARDIAN_EVM_ALLOWED_CHAIN_IDS" ] && \
+      [ -z "$GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN" ]; then
+      log_error "GUARDIAN_SERVER_FEATURES includes evm, so set GUARDIAN_EVM_ALLOWED_CHAIN_IDS or GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN"
+      return 1
+    fi
+    if [ -z "$GUARDIAN_EVM_RPC_URLS" ] && \
+      [ -z "$GUARDIAN_EVM_RPC_URLS_SECRET_ARN" ]; then
+      log_error "GUARDIAN_SERVER_FEATURES includes evm, so set GUARDIAN_EVM_RPC_URLS or GUARDIAN_EVM_RPC_URLS_SECRET_ARN"
+      return 1
+    fi
+    if [[ ! "$GUARDIAN_EVM_ENTRYPOINT_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+      log_error "GUARDIAN_EVM_ENTRYPOINT_ADDRESS must be a 20-byte 0x-prefixed hex address"
+      return 1
+    fi
+  fi
+
+  if [[ "$GUARDIAN_CORS_ALLOWED_ORIGINS" =~ (^|,)[[:space:]]*\*[[:space:]]*(,|$) ]]; then
+    log_error "GUARDIAN_CORS_ALLOWED_ORIGINS must use explicit origins, not wildcard"
     return 1
   fi
 
@@ -149,6 +283,34 @@ build_tf_vars() {
   TF_VARS+=("-var" "deployment_stage=${DEPLOY_STAGE}")
   TF_VARS+=("-var" "server_image_uri=${image_uri}")
   TF_VARS+=("-var" "server_network_type=${GUARDIAN_NETWORK_TYPE}")
+  TF_VARS+=("-var" "guardian_evm_allowed_chain_ids_secret_arn=${GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN}")
+  TF_VARS+=("-var" "guardian_evm_rpc_urls_secret_arn=${GUARDIAN_EVM_RPC_URLS_SECRET_ARN}")
+  TF_VARS+=("-var" "guardian_operator_public_keys_secret_arn=${GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN}")
+  if [ -n "$GUARDIAN_CORS_ALLOWED_ORIGINS" ]; then
+    TF_VARS+=("-var" "guardian_cors_allowed_origins=${GUARDIAN_CORS_ALLOWED_ORIGINS}")
+  fi
+  if [ -n "$GUARDIAN_EVM_ALLOWED_CHAIN_IDS" ]; then
+    TF_VARS+=("-var" "guardian_evm_allowed_chain_ids=${GUARDIAN_EVM_ALLOWED_CHAIN_IDS}")
+  fi
+  if [ -n "$GUARDIAN_EVM_RPC_URLS" ]; then
+    TF_VARS+=("-var" "guardian_evm_rpc_urls=${GUARDIAN_EVM_RPC_URLS}")
+  fi
+  if evm_feature_enabled; then
+    TF_VARS+=("-var" "guardian_evm_entrypoint_address=${GUARDIAN_EVM_ENTRYPOINT_ADDRESS}")
+  fi
+  if [ -n "$GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON" ]; then
+    TF_VARS+=("-var" "guardian_operator_public_keys=${GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON}")
+  fi
+  if [ -n "${GUARDIAN_ACK_FALCON_SECRET_NAME:-}" ]; then
+    TF_VARS+=("-var" "guardian_ack_falcon_secret_name=${GUARDIAN_ACK_FALCON_SECRET_NAME}")
+  fi
+  if [ -n "${GUARDIAN_ACK_ECDSA_SECRET_NAME:-}" ]; then
+    TF_VARS+=("-var" "guardian_ack_ecdsa_secret_name=${GUARDIAN_ACK_ECDSA_SECRET_NAME}")
+  fi
+  if storage_encryption_enabled; then
+    TF_VARS+=("-var" "guardian_storage_encryption_secret_name=$(storage_encryption_secret_name)")
+  fi
+  TF_VARS+=("-var" "guardian_dashboard_cursor_secret_name=$(dashboard_cursor_secret_name)")
 
   if [ -n "$DOMAIN_NAME" ]; then
     TF_VARS+=("-var" "domain_name=${DOMAIN_NAME}")
@@ -173,11 +335,35 @@ terraform_output_raw() {
 }
 
 ack_falcon_secret_name() {
-  echo "guardian-prod/server/ack-falcon-secret-key"
+  echo "${GUARDIAN_ACK_FALCON_SECRET_NAME:-${TF_VAR_guardian_ack_falcon_secret_name:-${STACK_NAME}/server/ack-falcon-secret-key}}"
 }
 
 ack_ecdsa_secret_name() {
-  echo "guardian-prod/server/ack-ecdsa-secret-key"
+  echo "${GUARDIAN_ACK_ECDSA_SECRET_NAME:-${TF_VAR_guardian_ack_ecdsa_secret_name:-${STACK_NAME}/server/ack-ecdsa-secret-key}}"
+}
+
+ack_ecdsa_kms_key_arn() {
+  echo "${TF_VAR_guardian_ack_ecdsa_kms_key_arn:-}"
+}
+
+storage_encryption_secret_name() {
+  echo "${GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME:-${STACK_NAME}/server/storage-encryption-key}"
+}
+
+storage_encryption_enabled() {
+  [ -n "$GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME" ]
+}
+
+dashboard_cursor_secret_name() {
+  echo "${GUARDIAN_DASHBOARD_CURSOR_SECRET_NAME:-${STACK_NAME}/server/dashboard-cursor-secret}"
+}
+
+ecdsa_backend_is_kms() {
+  [ -n "$(ack_ecdsa_kms_key_arn)" ]
+}
+
+ack_ecdsa_kms_alias() {
+  echo "alias/${STACK_NAME}-ack-ecdsa"
 }
 
 secret_exists() {
@@ -200,15 +386,181 @@ validate_ack_secrets_exist() {
     return 1
   fi
 
+  if ecdsa_backend_is_kms; then
+    log_info "ECDSA ACK signer is KMS-backed ($(ack_ecdsa_kms_key_arn)); skipping Secrets Manager check"
+    return 0
+  fi
+
   if ! secret_exists "$ecdsa_secret_name"; then
     log_error "Missing ECDSA ACK secret ${ecdsa_secret_name}. Run ./scripts/aws-deploy.sh bootstrap-ack-keys first."
     return 1
   fi
 }
 
+validate_storage_encryption_secret_exists() {
+  if [ "$DEPLOY_STAGE" != "prod" ]; then
+    return 0
+  fi
+
+  if ! storage_encryption_enabled; then
+    return 0
+  fi
+
+  local secret_name
+  local secret_string
+  local active_kid
+  local active_key_b64
+  local decoded_len
+  secret_name=$(storage_encryption_secret_name)
+
+  if ! secret_exists "$secret_name"; then
+    log_error "Storage encryption is enabled but secret ${secret_name} is missing. Run ./scripts/aws-deploy.sh bootstrap-storage-encryption-key first."
+    return 1
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_error "jq is required to validate the storage encryption key document"
+    return 1
+  fi
+
+  secret_string=$(aws secretsmanager get-secret-value \
+    --secret-id "$secret_name" \
+    --region "$AWS_REGION" \
+    --query SecretString \
+    --output text 2>/dev/null) || {
+    log_error "Failed to read storage encryption secret ${secret_name}"
+    return 1
+  }
+
+  active_kid=$(jq -er '.active' <<<"$secret_string") || {
+    log_error "Storage encryption secret ${secret_name} is invalid: missing .active"
+    return 1
+  }
+
+  active_key_b64=$(jq -er --arg kid "$active_kid" '.keys[$kid]' <<<"$secret_string") || {
+    log_error "Storage encryption secret ${secret_name} is invalid: .keys does not contain active kid '${active_kid}'"
+    return 1
+  }
+
+  decoded_len=$(printf '%s' "$active_key_b64" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')
+  if [ "$decoded_len" != "32" ]; then
+    log_error "Storage encryption secret ${secret_name} is invalid: active key must decode to 32 bytes"
+    return 1
+  fi
+}
+
+validate_dashboard_cursor_secret_exists() {
+  if [ "$DEPLOY_STAGE" != "prod" ]; then
+    return 0
+  fi
+
+  local secret_name
+  local secret_value
+  secret_name=$(dashboard_cursor_secret_name)
+
+  if ! secret_exists "$secret_name"; then
+    log_error "Missing dashboard cursor secret ${secret_name}. Run ./scripts/aws-deploy.sh bootstrap-dashboard-cursor-secret first."
+    return 1
+  fi
+
+  secret_value=$(aws secretsmanager get-secret-value \
+    --secret-id "$secret_name" \
+    --region "$AWS_REGION" \
+    --query SecretString \
+    --output text 2>/dev/null) || {
+    log_error "Failed to read dashboard cursor secret ${secret_name}"
+    return 1
+  }
+
+  if [[ ! "$secret_value" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    log_error "Dashboard cursor secret ${secret_name} must contain exactly 64 hexadecimal characters"
+    return 1
+  fi
+}
+
+cmd_bootstrap_dashboard_cursor_secret() {
+  local secret_name
+  local secret_value
+  local secret_file
+  secret_name=$(dashboard_cursor_secret_name)
+
+  if secret_exists "$secret_name"; then
+    log_error "Refusing to overwrite existing dashboard cursor secret ${secret_name}"
+    return 1
+  fi
+
+  log_info "Generating 32-byte dashboard cursor secret locally..."
+  secret_value=$(openssl rand -hex 32)
+  if [[ ! "$secret_value" =~ ^[0-9a-f]{64}$ ]]; then
+    log_error "Failed to generate dashboard cursor secret"
+    return 1
+  fi
+
+  secret_file=$(mktemp)
+  printf '%s' "$secret_value" >"$secret_file"
+  log_info "Creating dashboard cursor secret ${secret_name}"
+  if aws secretsmanager create-secret \
+    --name "$secret_name" \
+    --secret-string "file://$secret_file" \
+    --region "$AWS_REGION" >/dev/null; then
+    rm -f "$secret_file"
+  else
+    rm -f "$secret_file"
+    return 1
+  fi
+
+  log_info "Dashboard cursor secret bootstrap complete"
+}
+
+cmd_bootstrap_storage_encryption_key() {
+  local secret_name
+  local key_material
+  local secret_value
+  secret_name=$(storage_encryption_secret_name)
+
+  if secret_exists "$secret_name"; then
+    log_error "Refusing to overwrite existing storage encryption secret ${secret_name}"
+    log_error "Rotating the storage encryption key means adding a new kid to the existing secret document, not re-bootstrapping"
+    return 1
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_error "jq is required to build the storage encryption key document"
+    return 1
+  fi
+
+  log_info "Generating 32-byte storage encryption key locally..."
+  key_material=$(openssl rand -base64 32)
+  if [ -z "$key_material" ]; then
+    log_error "Failed to generate storage encryption key material"
+    return 1
+  fi
+
+  secret_value=$(jq -nc --arg k "$key_material" '{active:"k1", keys:{k1:$k}}')
+
+  log_info "Creating storage encryption secret ${secret_name}"
+  local secret_file
+  secret_file=$(mktemp)
+  printf '%s' "$secret_value" >"$secret_file"
+  if aws secretsmanager create-secret \
+    --name "$secret_name" \
+    --secret-string "file://$secret_file" \
+    --region "$AWS_REGION" >/dev/null; then
+    rm -f "$secret_file"
+  else
+    rm -f "$secret_file"
+    return 1
+  fi
+
+  log_info "Storage encryption key bootstrap complete"
+  log_info "Enable encryption on the next deploy by exporting the secret name:"
+  log_info "  export GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME=${secret_name}"
+}
+
 cmd_bootstrap_ack_keys() {
   local falcon_secret_name
   local ecdsa_secret_name
+  local manage_ecdsa_secret=true
   local existing_secrets=()
   local generated_keys
   local falcon_secret_value
@@ -216,10 +568,16 @@ cmd_bootstrap_ack_keys() {
   falcon_secret_name=$(ack_falcon_secret_name)
   ecdsa_secret_name=$(ack_ecdsa_secret_name)
 
+  if ecdsa_backend_is_kms; then
+    manage_ecdsa_secret=false
+    log_info "ECDSA ACK signer is KMS-backed; not creating an ECDSA Secrets Manager secret"
+    log_info "Provision the KMS key with: ./scripts/aws-deploy.sh bootstrap-kms-ecdsa-key"
+  fi
+
   if secret_exists "$falcon_secret_name"; then
     existing_secrets+=("$falcon_secret_name")
   fi
-  if secret_exists "$ecdsa_secret_name"; then
+  if [ "$manage_ecdsa_secret" = true ] && secret_exists "$ecdsa_secret_name"; then
     existing_secrets+=("$ecdsa_secret_name")
   fi
 
@@ -231,14 +589,9 @@ cmd_bootstrap_ack_keys() {
   log_info "Generating ACK keys locally..."
   generated_keys=$(cargo run --quiet --package guardian-server --bin ack-keygen)
   falcon_secret_value=$(printf '%s' "$generated_keys" | jq -r '.falcon_secret_key')
-  ecdsa_secret_value=$(printf '%s' "$generated_keys" | jq -r '.ecdsa_secret_key')
 
   if [ -z "$falcon_secret_value" ] || [ "$falcon_secret_value" = "null" ]; then
     log_error "Failed to generate Falcon ACK key material"
-    return 1
-  fi
-  if [ -z "$ecdsa_secret_value" ] || [ "$ecdsa_secret_value" = "null" ]; then
-    log_error "Failed to generate ECDSA ACK key material"
     return 1
   fi
 
@@ -248,20 +601,75 @@ cmd_bootstrap_ack_keys() {
     --secret-string "$falcon_secret_value" \
     --region "$AWS_REGION" >/dev/null
 
-  log_info "Creating ECDSA ACK secret ${ecdsa_secret_name}"
-  aws secretsmanager create-secret \
-    --name "$ecdsa_secret_name" \
-    --secret-string "$ecdsa_secret_value" \
-    --region "$AWS_REGION" >/dev/null
+  if [ "$manage_ecdsa_secret" = true ]; then
+    ecdsa_secret_value=$(printf '%s' "$generated_keys" | jq -r '.ecdsa_secret_key')
+    if [ -z "$ecdsa_secret_value" ] || [ "$ecdsa_secret_value" = "null" ]; then
+      log_error "Failed to generate ECDSA ACK key material"
+      return 1
+    fi
+
+    log_info "Creating ECDSA ACK secret ${ecdsa_secret_name}"
+    aws secretsmanager create-secret \
+      --name "$ecdsa_secret_name" \
+      --secret-string "$ecdsa_secret_value" \
+      --region "$AWS_REGION" >/dev/null
+  fi
 
   log_info "ACK key bootstrap complete"
+}
+
+cmd_bootstrap_kms_ecdsa_key() {
+  local alias_name
+  local key_id
+  local key_arn
+  alias_name=$(ack_ecdsa_kms_alias)
+
+  if aws kms describe-key --key-id "$alias_name" --region "$AWS_REGION" >/dev/null 2>&1; then
+    key_arn=$(aws kms describe-key --key-id "$alias_name" --region "$AWS_REGION" \
+      --query KeyMetadata.Arn --output text)
+    log_error "Refusing to overwrite existing KMS key behind ${alias_name} (${key_arn})"
+    log_error "Retiring an ACK signing key is a SwitchGuardian identity migration, not a re-bootstrap"
+    return 1
+  fi
+
+  log_info "Creating KMS ECDSA ACK signing key (ECC_SECG_P256K1 / SIGN_VERIFY)"
+  key_id=$(aws kms create-key \
+    --key-spec ECC_SECG_P256K1 \
+    --key-usage SIGN_VERIFY \
+    --description "Guardian ${STACK_NAME} ACK ECDSA signer" \
+    --region "$AWS_REGION" \
+    --query KeyMetadata.KeyId --output text)
+
+  key_arn=$(aws kms describe-key --key-id "$key_id" --region "$AWS_REGION" \
+    --query KeyMetadata.Arn --output text)
+
+  log_info "Creating alias ${alias_name}"
+  if ! aws kms create-alias \
+    --alias-name "$alias_name" \
+    --target-key-id "$key_id" \
+    --region "$AWS_REGION"; then
+    log_error "Created KMS key ${key_arn} but failed to bind alias ${alias_name}"
+    log_warn "Scheduling the orphaned key for deletion (7-day reversible window)"
+    aws kms schedule-key-deletion \
+      --key-id "$key_id" \
+      --pending-window-in-days 7 \
+      --region "$AWS_REGION" >/dev/null \
+      || log_error "Cleanup failed; delete it manually: aws kms schedule-key-deletion --key-id ${key_id} --pending-window-in-days 7 --region ${AWS_REGION}"
+    return 1
+  fi
+
+  log_info "KMS ECDSA ACK key ready: ${key_arn}"
+  log_info "Export this before bootstrap-ack-keys and deploy so the script skips the ECDSA Secrets Manager secret (Terraform reads it too):"
+  log_info "  export TF_VAR_guardian_ack_ecdsa_kms_key_arn=\"${key_arn}\""
 }
 
 cmd_build_and_push() {
   local ecr_repo_uri
   local docker_platform
+  local git_sha
   ecr_repo_uri=$(get_ecr_repo_uri)
   docker_platform=$(docker_platform_for_arch "$CPU_ARCHITECTURE")
+  git_sha=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
 
   log_info "Creating ECR repository..."
   aws ecr create-repository \
@@ -272,8 +680,8 @@ cmd_build_and_push() {
   aws ecr get-login-password --region "$AWS_REGION" | \
     docker login --username AWS --password-stdin "${ecr_repo_uri%/*}"
 
-  log_info "Building Docker image..."
-  docker build --platform "$docker_platform" --build-arg GUARDIAN_SERVER_FEATURES=postgres --no-cache -t "${ECR_REPO_NAME}:latest" .
+  log_info "Building Docker image (commit ${git_sha:-unknown})..."
+  docker build --platform "$docker_platform" --build-arg "GUARDIAN_SERVER_FEATURES=${GUARDIAN_SERVER_FEATURES}" --build-arg "GUARDIAN_GIT_SHA=${git_sha}" --no-cache -t "${ECR_REPO_NAME}:latest" .
 
   log_info "Tagging and pushing to ECR..."
   docker tag "${ECR_REPO_NAME}:latest" "${ecr_repo_uri}:latest"
@@ -282,10 +690,30 @@ cmd_build_and_push() {
   log_info "Image pushed successfully"
 }
 
+cmd_plan() {
+  log_info "Planning GUARDIAN server Terraform changes..."
+  validate_deploy_config
+  validate_ack_secrets_exist || return 1
+  validate_storage_encryption_secret_exists || return 1
+  validate_dashboard_cursor_secret_exists || return 1
+
+  local IMAGE_URI
+  IMAGE_URI=$(resolve_deploy_image_uri) || return 1
+  ensure_terraform_init || return 1
+  build_tf_vars "$IMAGE_URI"
+
+  log_info "Using image ${IMAGE_URI}"
+  log_info "Using Terraform state ${TF_STATE_PATH}"
+  log_info "Running terraform plan..."
+  terraform -chdir="$TF_DIR" plan -state="$TF_STATE_PATH" "${TF_VARS[@]}"
+}
+
 cmd_deploy() {
   log_info "Deploying GUARDIAN server with Terraform..."
   validate_deploy_config
   validate_ack_secrets_exist || return 1
+  validate_storage_encryption_secret_exists || return 1
+  validate_dashboard_cursor_secret_exists || return 1
 
   if [ "$SKIP_BUILD" = false ]; then
     cmd_build_and_push
@@ -301,7 +729,7 @@ cmd_deploy() {
   log_info "Deploying image ${IMAGE_URI}"
   log_info "Using Terraform state ${TF_STATE_PATH}"
   log_info "Applying Terraform..."
-  terraform -chdir="$TF_DIR" apply -auto-approve -state="$TF_STATE_PATH" -backup="$TF_STATE_BACKUP_PATH" "${TF_VARS[@]}"
+  terraform -chdir="$TF_DIR" apply -state="$TF_STATE_PATH" -backup="$TF_STATE_BACKUP_PATH" "${TF_VARS[@]}"
 
   local ALB_URL
   local ALB_DNS
@@ -324,6 +752,10 @@ cmd_deploy() {
   local DB_POOL_MAX
   local METADATA_DB_POOL_MAX
   local DATABASE_URL_SECRET_ARN
+  local EVM_ALLOWED_CHAIN_IDS_SECRET_ARN
+  local EVM_RPC_URLS_SECRET_ARN
+  local EVM_ENTRYPOINT_ADDRESS
+  local CORS_ALLOWED_ORIGINS
   ALB_URL=$(terraform_output_raw alb_url)
   ALB_DNS=$(terraform_output_raw alb_dns_name)
   CUSTOM_DOMAIN_URL=$(terraform_output_raw custom_domain_url)
@@ -344,6 +776,10 @@ cmd_deploy() {
   DB_POOL_MAX=$(terraform_output_raw guardian_db_pool_max_size)
   METADATA_DB_POOL_MAX=$(terraform_output_raw guardian_metadata_db_pool_max_size)
   DATABASE_URL_SECRET_ARN=$(terraform_output_raw database_url_secret_arn)
+  EVM_ALLOWED_CHAIN_IDS_SECRET_ARN=$(terraform_output_raw guardian_evm_allowed_chain_ids_secret_arn)
+  EVM_RPC_URLS_SECRET_ARN=$(terraform_output_raw guardian_evm_rpc_urls_secret_arn)
+  EVM_ENTRYPOINT_ADDRESS=$(terraform_output_raw guardian_evm_entrypoint_address)
+  CORS_ALLOWED_ORIGINS=$(terraform_output_raw guardian_cors_allowed_origins)
   if [ -n "$ALB_DNS" ] && [[ "$ALB_URL" == https://* ]]; then
     HTTPS_URL="https://${ALB_DNS}"
   fi
@@ -397,6 +833,18 @@ cmd_deploy() {
     fi
     if [ -n "$DATABASE_URL_SECRET_ARN" ]; then
       echo "  Database URL secret: ${DATABASE_URL_SECRET_ARN}"
+    fi
+    if [ -n "$EVM_ALLOWED_CHAIN_IDS_SECRET_ARN" ]; then
+      echo "  EVM chain IDs secret: ${EVM_ALLOWED_CHAIN_IDS_SECRET_ARN}"
+    fi
+    if [ -n "$EVM_RPC_URLS_SECRET_ARN" ]; then
+      echo "  EVM RPC URLs secret: ${EVM_RPC_URLS_SECRET_ARN}"
+    fi
+    if [ -n "$EVM_ENTRYPOINT_ADDRESS" ]; then
+      echo "  EVM EntryPoint address: ${EVM_ENTRYPOINT_ADDRESS}"
+    fi
+    if [ -n "$CORS_ALLOWED_ORIGINS" ]; then
+      echo "  CORS allowed origins: ${CORS_ALLOWED_ORIGINS}"
     fi
     echo ""
     echo "  Health check: curl ${ALB_URL}/"
@@ -496,8 +944,23 @@ case "${COMMAND:-}" in
   deploy)
     cmd_deploy
     ;;
+  plan)
+    cmd_plan
+    ;;
+  build)
+    cmd_build_and_push
+    ;;
   bootstrap-ack-keys)
     cmd_bootstrap_ack_keys
+    ;;
+  bootstrap-kms-ecdsa-key)
+    cmd_bootstrap_kms_ecdsa_key
+    ;;
+  bootstrap-storage-encryption-key)
+    cmd_bootstrap_storage_encryption_key
+    ;;
+  bootstrap-dashboard-cursor-secret)
+    cmd_bootstrap_dashboard_cursor_secret
     ;;
   status)
     cmd_status
@@ -515,7 +978,12 @@ case "${COMMAND:-}" in
     echo ""
     echo "Commands:"
     echo "  deploy   Build/push image and run Terraform apply"
+    echo "  plan     Run Terraform plan without building or applying"
+    echo "  build    Build and push the Docker image to ECR (no Terraform)"
     echo "  bootstrap-ack-keys  Create the prod ACK key secrets in Secrets Manager"
+    echo "  bootstrap-kms-ecdsa-key  Create the KMS ECDSA ACK signing key + alias (KMS backend)"
+    echo "  bootstrap-storage-encryption-key  Create the storage encryption key secret in Secrets Manager"
+    echo "  bootstrap-dashboard-cursor-secret  Create the shared dashboard cursor secret in Secrets Manager"
     echo "  status   Show deployment status and URLs"
     echo "  logs     Tail CloudWatch logs"
     echo "  cleanup  Remove all AWS resources"
@@ -535,13 +1003,31 @@ case "${COMMAND:-}" in
     echo "  ECR_REPO_NAME= Override the ECR/image repository name (default: <stack-name>-server)"
     echo "  TF_STATE_PATH= Override the Terraform state file path (default: infra/terraform.<stack>.<stage>.tfstate)"
     echo "  GUARDIAN_NETWORK_TYPE= Runtime Miden network for the server (default: MidenTestnet)"
+    echo "  GUARDIAN_SERVER_FEATURES= Cargo features for guardian-server Docker build (default: postgres)"
+    echo "  GUARDIAN_CORS_ALLOWED_ORIGINS= Comma-separated explicit HTTP origins allowed by credentialed CORS"
+    echo "  GUARDIAN_EVM_CHAIN_CONFIG_FILE= JSON file for EVM chain IDs, RPC URLs, and EntryPoint address"
+    echo "  GUARDIAN_EVM_ALLOWED_CHAIN_IDS= Comma-separated EVM chain IDs; creates a stack Secrets Manager secret"
+    echo "  GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN= Secrets Manager ARN with comma-separated EVM chain IDs"
+    echo "  GUARDIAN_EVM_RPC_URLS= Comma-separated chain_id=url EVM RPC map; creates a stack Secrets Manager secret"
+    echo "  GUARDIAN_EVM_RPC_URLS_SECRET_ARN= Secrets Manager ARN with comma-separated EVM RPC map"
+    echo "  GUARDIAN_EVM_ENTRYPOINT_ADDRESS= Shared EVM EntryPoint address (default: v0.9)"
+    echo "  GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON= JSON array of Falcon operator public keys; creates a stack Secrets Manager secret"
+    echo "  GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN= Secrets Manager ARN with dashboard operator public keys JSON"
+    echo "  GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME= Storage encryption key secret name; setting it enables encryption at rest (prod) and wires the IAM grant + env var (bootstrap default: <stack-name>/server/storage-encryption-key)"
+    echo "  GUARDIAN_DASHBOARD_CURSOR_SECRET_NAME= Shared dashboard cursor secret name (prod default: <stack-name>/server/dashboard-cursor-secret)"
     echo ""
     echo "Examples:"
     echo "  ./scripts/aws-deploy.sh deploy"
+    echo "  ./scripts/aws-deploy.sh build"
+    echo "  ./scripts/aws-deploy.sh plan"
+    echo "  ./scripts/aws-deploy.sh deploy --skip-build"
     echo "  DEPLOY_STAGE=prod ./scripts/aws-deploy.sh bootstrap-ack-keys"
+    echo "  STACK_NAME=guardian-prod ./scripts/aws-deploy.sh bootstrap-kms-ecdsa-key  # prints the ARN to set"
+    echo "  DEPLOY_STAGE=prod STACK_NAME=guardian-prod ./scripts/aws-deploy.sh bootstrap-storage-encryption-key  # prints the name to export"
+    echo "  DEPLOY_STAGE=prod STACK_NAME=guardian-prod ./scripts/aws-deploy.sh bootstrap-dashboard-cursor-secret"
+    echo "  GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME=guardian-prod/server/storage-encryption-key DEPLOY_STAGE=prod STACK_NAME=guardian-prod ./scripts/aws-deploy.sh deploy --skip-build"
     echo "  DEPLOY_STAGE=dev STACK_NAME=guardian SUBDOMAIN=guardian-stg ./scripts/aws-deploy.sh deploy"
     echo "  DEPLOY_STAGE=prod STACK_NAME=guardian-prod SUBDOMAIN=guardian ./scripts/aws-deploy.sh deploy --skip-build"
-    echo "  ./scripts/aws-deploy.sh deploy --skip-build"
     echo "  ./scripts/aws-deploy.sh status"
     echo "  ./scripts/aws-deploy.sh cleanup"
     ;;

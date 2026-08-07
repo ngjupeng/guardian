@@ -4,12 +4,12 @@ use guardian_client::GuardianClient;
 use guardian_shared::ToJson;
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
-use miden_protocol::asset::FungibleAsset;
-use miden_protocol::note::NoteId;
+use miden_protocol::note::{NoteId, NoteType};
 
 use crate::MidenSdkClient;
 use crate::account::MultisigAccount;
 use crate::error::{MultisigError, Result};
+use crate::execution::build_transfer_asset;
 use crate::guardian_endpoint::verify_endpoint_commitment;
 use crate::keystore::{KeyManager, ensure_hex_prefix};
 use crate::payload::ProposalPayload;
@@ -18,8 +18,7 @@ use crate::proposal::{Proposal, ProposalMetadata, TransactionType};
 use crate::utils::hex_body_eq;
 
 use super::{
-    build_consume_notes_transaction_request, build_p2id_transaction_request,
-    build_update_guardian_transaction_request,
+    build_p2id_transaction_request, build_update_guardian_transaction_request,
     build_update_procedure_threshold_transaction_request, build_update_signers_transaction_request,
     execute_for_summary, generate_salt, word_to_hex,
 };
@@ -78,6 +77,7 @@ impl ProposalBuilder {
                 recipient,
                 faucet_id,
                 amount,
+                note_type,
             } => {
                 self.build_p2id(
                     miden_client,
@@ -86,11 +86,12 @@ impl ProposalBuilder {
                     recipient,
                     faucet_id,
                     amount,
+                    note_type,
                     key_manager,
                 )
                 .await
             }
-            TransactionType::ConsumeNotes { ref note_ids } => {
+            TransactionType::ConsumeNotes { ref note_ids, .. } => {
                 self.build_consume_notes(
                     miden_client,
                     guardian_client,
@@ -130,6 +131,9 @@ impl ProposalBuilder {
             }
             TransactionType::UpdateSigners { .. } => Err(MultisigError::InvalidConfig(
                 "Use AddCosigner or RemoveCosigner for signer updates".to_string(),
+            )),
+            TransactionType::Custom => Err(MultisigError::UnsupportedTransactionType(
+                "cannot create a proposal for a custom transaction type".to_string(),
             )),
         }
     }
@@ -196,7 +200,10 @@ impl ProposalBuilder {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: Vec::new(),
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: None,
@@ -301,7 +308,10 @@ impl ProposalBuilder {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: Vec::new(),
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: None,
@@ -351,15 +361,14 @@ impl ProposalBuilder {
         recipient: AccountId,
         faucet_id: AccountId,
         amount: u64,
+        note_type: NoteType,
         key_manager: &dyn KeyManager,
     ) -> Result<Proposal> {
         let account_id = account.id();
         let required_signatures =
             account.effective_threshold_for_procedure(ProcedureName::SendAsset)? as usize;
 
-        // Create the fungible asset
-        let asset = FungibleAsset::new(faucet_id, amount)
-            .map_err(|e| MultisigError::InvalidConfig(format!("failed to create asset: {}", e)))?;
+        let asset = build_transfer_asset(account.inner(), faucet_id, amount)?;
 
         // Generate salt for replay protection
         let salt = generate_salt();
@@ -369,6 +378,7 @@ impl ProposalBuilder {
             account.inner(),
             recipient,
             vec![asset.into()],
+            note_type,
             salt,
             std::iter::empty(),
         )?;
@@ -389,7 +399,10 @@ impl ProposalBuilder {
             recipient_hex: Some(recipient.to_string()),
             faucet_id_hex: Some(faucet_id.to_string()),
             amount: Some(amount),
+            note_type: (note_type != NoteType::Public).then(|| note_type.to_string()),
             note_ids_hex: Vec::new(),
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: None,
@@ -405,6 +418,7 @@ impl ProposalBuilder {
                 faucet_id.to_string(),
                 amount,
                 word_to_hex(&salt),
+                note_type,
             )
             .with_required_signatures(required_signatures);
 
@@ -425,6 +439,7 @@ impl ProposalBuilder {
                 recipient,
                 faucet_id,
                 amount,
+                note_type,
             },
             metadata,
         );
@@ -448,24 +463,24 @@ impl ProposalBuilder {
         // Generate salt for replay protection
         let salt = generate_salt();
 
-        // Build the consume notes transaction request (no signatures for proposal)
-        let tx_request = build_consume_notes_transaction_request(
-            miden_client,
-            note_ids.clone(),
+        // Fetch notes from the proposer's local store for v2 embedding (FR-012).
+        let fetched_notes =
+            crate::transaction::consume::fetch_notes_from_store(miden_client, &note_ids).await?;
+        let serialized_notes: Vec<crate::proposal::SerializedNote> = fetched_notes
+            .iter()
+            .map(crate::proposal::SerializedNote::from_note)
+            .collect();
+
+        let tx_request = crate::transaction::build_consume_notes_transaction_request_from_notes(
+            fetched_notes,
             salt,
             std::iter::empty(),
-        )
-        .await?;
+        )?;
 
-        // Execute to get the TransactionSummary
         let tx_summary = execute_for_summary(miden_client, account_id, tx_request).await?;
-
-        // Sign the transaction summary commitment
         let tx_commitment = tx_summary.to_commitment();
 
-        // Build proposal metadata
         let note_ids_hex: Vec<String> = note_ids.iter().map(|id| id.to_hex()).collect();
-
         let metadata = ProposalMetadata {
             tx_summary_json: Some(tx_summary.to_json()),
             proposal_type: None,
@@ -475,7 +490,12 @@ impl ProposalBuilder {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: note_ids_hex.clone(),
+            consume_notes_metadata_version: Some(
+                crate::proposal::CONSUME_NOTES_METADATA_VERSION_V2,
+            ),
+            consume_notes_notes: serialized_notes.clone(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: None,
@@ -483,11 +503,28 @@ impl ProposalBuilder {
             signers: vec![key_manager.commitment_hex()],
         };
 
-        // Build the payload using ProposalPayload
+        let notes_base64: Vec<String> = serialized_notes
+            .into_iter()
+            .map(crate::proposal::SerializedNote::into_inner)
+            .collect();
+
         let payload = ProposalPayload::new(&tx_summary)
             .with_signature(key_manager, tx_commitment)
-            .with_note_consumption_metadata(&note_ids_hex, word_to_hex(&salt))
+            .with_note_consumption_metadata_v2(note_ids_hex, notes_base64, word_to_hex(&salt))
             .with_required_signatures(required_signatures);
+
+        // FR-011: cap covers only the metadata fragment, not the full payload.
+        if let Some(meta) = payload.metadata.as_ref() {
+            let serialized_len = serde_json::to_vec(meta)
+                .map_err(MultisigError::Serialization)?
+                .len();
+            if serialized_len > crate::proposal::MAX_CONSUME_NOTES_METADATA_BYTES {
+                return Err(MultisigError::ConsumeNotesMetadataOversize {
+                    limit: crate::proposal::MAX_CONSUME_NOTES_METADATA_BYTES,
+                    actual: serialized_len,
+                });
+            }
+        }
 
         // Push proposal to GUARDIAN
         let nonce = account.nonce() + 1;
@@ -498,11 +535,16 @@ impl ProposalBuilder {
                 MultisigError::GuardianServer(format!("failed to push proposal: {}", e))
             })?;
 
-        // Build the Proposal
+        // Clone notes for the runtime TransactionType; metadata keeps its own copy.
+        let notes_for_tx_type = metadata.consume_notes_notes.clone();
         let proposal = Proposal::new(
             tx_summary,
             nonce,
-            TransactionType::ConsumeNotes { note_ids },
+            TransactionType::ConsumeNotes {
+                note_ids,
+                metadata_version: Some(crate::proposal::CONSUME_NOTES_METADATA_VERSION_V2),
+                notes: notes_for_tx_type,
+            },
             metadata,
         );
         Self::ensure_response_commitment(&proposal, &response.commitment)?;
@@ -552,7 +594,10 @@ impl ProposalBuilder {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: Vec::new(),
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: Some(word_to_hex(&new_guardian_pubkey)),
             new_guardian_endpoint: Some(new_guardian_endpoint.clone()),
             target_procedure: None,
@@ -628,7 +673,10 @@ impl ProposalBuilder {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: Vec::new(),
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: Some(procedure.to_string()),
@@ -673,7 +721,7 @@ mod tests {
 
     fn test_proposal() -> Proposal {
         let account_id =
-            AccountId::from_hex("0x7bfb0f38b0fafa103f86a805594170").expect("valid account id");
+            AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").expect("valid account id");
         let account_delta = AccountDelta::new(
             account_id,
             AccountStorageDelta::default(),
@@ -685,7 +733,7 @@ mod tests {
             account_delta,
             InputNotes::new(Vec::new()).expect("empty input notes"),
             RawOutputNotes::new(Vec::new()).expect("empty output notes"),
-            Word::from([Felt::new(9), ZERO, ZERO, ZERO]),
+            Word::from([Felt::new_unchecked(9), ZERO, ZERO, ZERO]),
         );
 
         Proposal::new(
@@ -693,11 +741,13 @@ mod tests {
             1,
             TransactionType::ConsumeNotes {
                 note_ids: vec![miden_protocol::note::NoteId::from_raw(Word::from([
-                    Felt::new(1),
+                    Felt::new_unchecked(1),
                     ZERO,
                     ZERO,
                     ZERO,
                 ]))],
+                metadata_version: None,
+                notes: Vec::new(),
             },
             ProposalMetadata {
                 note_ids_hex: vec![

@@ -3,9 +3,10 @@
 #   docker build --platform linux/amd64 ...
 FROM rust:1.93.0-bookworm as base-builder
 
-# Install protobuf compiler (pinned to specific version)
+# Install protobuf compiler (pinned to upstream 3.21.12; the Debian
+# packaging revision floats so point-release rebuilds don't break the build)
 RUN apt-get update && apt-get install -y \
-    protobuf-compiler=3.21.12-3 \
+    "protobuf-compiler=3.21.12-*" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,6 +26,9 @@ COPY examples ./examples
 
 # Build for release (only server)
 FROM base-builder as server-builder
+
+# build.rs reads this to stamp the git commit; the build context has no .git to fall back on.
+ARG GUARDIAN_GIT_SHA
 
 RUN if [ -n "$GUARDIAN_SERVER_FEATURES" ]; then \
       cargo build --release --package guardian-server --bin server --features "$GUARDIAN_SERVER_FEATURES"; \
@@ -51,7 +55,7 @@ COPY --from=benchmark-builder /app/crates/contracts/masm /app/crates/contracts/m
 ENTRYPOINT ["/app/guardian-prod-benchmarks"]
 
 # Runtime stage
-FROM debian:bookworm-slim@sha256:7e490910eea2861b9664577a96b54ce68ea3e02ce7f51d89cb0103a6f9c386e0
+FROM debian:bookworm-slim@sha256:7e490910eea2861b9664577a96b54ce68ea3e02ce7f51d89cb0103a6f9c386e0 as server-runner
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

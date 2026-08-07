@@ -21,7 +21,8 @@ export type ServerDeltaStatus =
   | { status: 'pending'; timestamp: string; proposer_id: string; cosigner_sigs: ServerCosignerSignature[] }
   | { status: 'candidate'; timestamp: string }
   | { status: 'canonical'; timestamp: string }
-  | { status: 'discarded'; timestamp: string };
+  | { status: 'retained'; timestamp: string; reason?: 'retry_exhausted' | 'diverged' }
+  | { status: 'discarded'; timestamp: string; reason?: string };
 
 export type ServerProposalType =
   | 'add_signer'
@@ -31,7 +32,10 @@ export type ServerProposalType =
   | 'switch_guardian'
   | 'consume_notes'
   | 'p2id'
-  | 'custom';
+  | 'custom'
+  // The server accepts arbitrary proposal types (issue #266); known literals are
+  // kept for autocomplete while `(string & {})` admits any custom label.
+  | (string & {});
 
 export interface ServerProposalMetadata {
   proposal_type?: ServerProposalType;
@@ -44,9 +48,15 @@ export interface ServerProposalMetadata {
   new_guardian_pubkey?: string;
   new_guardian_endpoint?: string;
   note_ids?: string[];
+  /** consume_notes metadata version (issue #229). Absent => v1. */
+  consume_notes_metadata_version?: number;
+  /** v2 embedded notes (base64), index-aligned with `note_ids`. */
+  consume_notes_notes?: string[];
   recipient_id?: string;
   faucet_id?: string;
   amount?: string;
+  /** P2ID note visibility, "public" or "private" (issue #322). Absent => public. */
+  note_type?: string;
 }
 
 export interface ServerDeltaObject {
@@ -130,6 +140,18 @@ export interface ServerProposalsResponse {
   proposals: ServerDeltaObject[];
 }
 
+export interface ServerAbandonCandidateRequest {
+  account_id: string;
+  nonce: number;
+}
+
+export interface ServerAbandonCandidateResponse {
+  account_id: string;
+  nonce: number;
+  state: 'pending' | 'abandoned' | 'retained';
+  abandon_requested_at?: string;
+}
+
 export interface ServerSignProposalRequest {
   account_id: string;
   commitment: string;
@@ -139,4 +161,21 @@ export interface ServerSignProposalRequest {
 export interface ServerPubkeyResponse {
   commitment: string;
   pubkey?: string;
+}
+
+export interface ServerStatusResponse {
+  status: string;
+  version: string;
+  git_commit: string;
+  environment: string;
+  started_at: string;
+  uptime_seconds: number;
+}
+
+export interface ServerLookupAccount {
+  account_id: string;
+}
+
+export interface ServerLookupResponse {
+  accounts: ServerLookupAccount[];
 }

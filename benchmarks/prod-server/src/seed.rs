@@ -10,7 +10,7 @@ use miden_confidential_contracts::multisig_guardian::{
 use miden_protocol::Word;
 use miden_protocol::account::AccountId;
 use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
-    PublicKey as EcdsaPublicKey, SecretKey as EcdsaSecretKey,
+    PublicKey as EcdsaPublicKey, SigningKey as EcdsaSecretKey,
 };
 use miden_protocol::crypto::dsa::falcon512_poseidon2::{
     PublicKey as FalconPublicKey, SecretKey as FalconSecretKey,
@@ -176,7 +176,7 @@ fn create_account_seed(
     guardian_commitment: Word,
     seed: [u8; 32],
 ) -> Result<AccountSeed> {
-    let signer_commitments = vec![owner_signer_commitment.to_string()];
+    let signer_commitments = [owner_signer_commitment.to_string()];
     let signer_words = signer_commitments
         .iter()
         .map(|commitment| word_from_hex(commitment))

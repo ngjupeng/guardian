@@ -1,6 +1,6 @@
 use crate::builder::state::AppState;
 use crate::delta_object::DeltaObject;
-use crate::error::Result;
+use crate::error::{GuardianError, Result};
 use crate::metadata::auth::Credentials;
 use crate::services::resolve_account;
 
@@ -27,14 +27,22 @@ pub async fn get_delta_proposals(
     // Resolve account and verify authentication
     let resolved = resolve_account(state, &account_id, &credentials).await?;
 
-    // Get all proposals from the proposals directory
-    let mut proposals = resolved
+    let mut proposals: Vec<DeltaObject> = resolved
         .storage
         .pull_all_delta_proposals(&account_id)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            tracing::error!(
+                account_id = %account_id,
+                error = %e,
+                "Failed to load delta proposals"
+            );
+            GuardianError::StorageError(format!("Failed to load delta proposals: {e}"))
+        })?
+        .into_iter()
+        .map(|record| record.proposal)
+        .collect();
 
-    // Filter by status::Pending and sort by nonce
     proposals.retain(|p| p.status.is_pending());
     proposals.sort_by_key(|p| p.nonce);
 
@@ -51,7 +59,6 @@ mod tests {
     use crate::testing::helpers::create_test_app_state_with_mocks;
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     fn create_test_state() -> (
         AppState,
@@ -65,7 +72,7 @@ mod tests {
 
         let state = create_test_app_state_with_mocks(
             Arc::new(storage.clone()),
-            Arc::new(Mutex::new(network.clone())),
+            Arc::new(network.clone()),
             Arc::new(metadata.clone()),
         );
 
@@ -81,10 +88,14 @@ mod tests {
             auth: Auth::MidenFalconRpo {
                 cosigner_commitments,
             },
+            network_config: crate::metadata::NetworkConfig::miden_default(),
             created_at: "2024-11-14T12:00:00Z".to_string(),
             updated_at: "2024-11-14T12:00:00Z".to_string(),
             has_pending_candidate: false,
             last_auth_timestamp: None,
+            paused_at: None,
+            paused_reason: None,
+            released_at: None,
         }
     }
 
@@ -109,6 +120,7 @@ mod tests {
                 proposer_id,
                 cosigner_sigs: vec![],
             },
+            metadata: None,
         }
     }
 
@@ -131,6 +143,7 @@ mod tests {
             status: DeltaStatus::Canonical {
                 timestamp: "2024-11-14T12:00:00Z".to_string(),
             },
+            metadata: None,
         }
     }
 
@@ -138,7 +151,7 @@ mod tests {
     async fn test_get_delta_proposals_empty() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -164,7 +177,7 @@ mod tests {
     async fn test_get_delta_proposals_single_proposal() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -192,7 +205,7 @@ mod tests {
     async fn test_get_delta_proposals_multiple_sorted() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -226,7 +239,7 @@ mod tests {
     async fn test_get_delta_proposals_filters_canonical() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -256,10 +269,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_delta_proposals_storage_error_returns_empty() {
+    async fn test_get_delta_proposals_storage_error_fails_closed() {
         let (state, storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -276,16 +289,19 @@ mod tests {
             credentials: Credentials::signature(signer_pubkey, signer_signature, timestamp),
         };
 
-        let result = get_delta_proposals(&state, params).await.unwrap();
+        let result = get_delta_proposals(&state, params).await;
 
-        assert_eq!(result.proposals.len(), 0);
+        assert!(
+            matches!(result, Err(GuardianError::StorageError(_))),
+            "a storage/decryption failure must surface as an error, not an empty list"
+        );
     }
 
     #[tokio::test]
     async fn test_get_delta_proposals_unauthorized() {
         let (state, _storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (_authorized_pubkey, authorized_commitment, _, _) =
             crate::testing::helpers::generate_falcon_signature(&account_id);
@@ -323,7 +339,7 @@ mod tests {
     async fn test_get_delta_proposals_account_not_found() {
         let (state, _storage, _network, metadata) = create_test_state();
 
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
 
         let (signer_pubkey, _signer_commitment, signer_signature, timestamp) =
             crate::testing::helpers::generate_falcon_signature(&account_id);

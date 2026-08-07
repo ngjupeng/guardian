@@ -6,6 +6,7 @@ import type {
   DeltaProposalRequest,
   DeltaStatus,
   ExecutionDelta,
+  LookupResponse,
   ProposalSignature,
   ProposalMetadata,
   SignProposalRequest,
@@ -19,6 +20,7 @@ import type {
   ServerDeltaProposalRequest,
   ServerDeltaStatus,
   ServerExecutionDelta,
+  ServerLookupResponse,
   ServerProposalSignature,
   ServerProposalMetadata,
   ServerSignProposalRequest,
@@ -82,8 +84,10 @@ export function fromServerDeltaStatus(server: ServerDeltaStatus): DeltaStatus {
       return { status: 'candidate', timestamp: server.timestamp };
     case 'canonical':
       return { status: 'canonical', timestamp: server.timestamp };
+    case 'retained':
+      return { status: 'retained', timestamp: server.timestamp, reason: server.reason };
     case 'discarded':
-      return { status: 'discarded', timestamp: server.timestamp };
+      return { status: 'discarded', timestamp: server.timestamp, reason: server.reason };
   }
 }
 
@@ -99,9 +103,12 @@ export function fromServerProposalMetadata(server: ServerProposalMetadata): Prop
     newGuardianPubkey: server.new_guardian_pubkey,
     newGuardianEndpoint: server.new_guardian_endpoint,
     noteIds: server.note_ids,
+    consumeNotesMetadataVersion: server.consume_notes_metadata_version,
+    consumeNotesNotes: server.consume_notes_notes,
     recipientId: server.recipient_id,
     faucetId: server.faucet_id,
     amount: server.amount,
+    noteType: server.note_type,
   };
 }
 
@@ -148,6 +155,15 @@ export function fromServerConfigureResponse(server: ServerConfigureResponse): Co
   };
 }
 
+export function fromServerLookupResponse(server: ServerLookupResponse): LookupResponse {
+  if (!server || !Array.isArray(server.accounts)) {
+    throw new Error('Malformed /state/lookup response: expected { accounts: [...] }');
+  }
+  return {
+    accounts: server.accounts.map((entry) => ({ accountId: entry.account_id })),
+  };
+}
+
 export function toServerSignature(sig: ProposalSignature): ServerProposalSignature {
   if (sig.scheme === 'ecdsa') {
     return {
@@ -180,14 +196,16 @@ export function toServerDeltaStatus(status: DeltaStatus): ServerDeltaStatus {
       return { status: 'candidate', timestamp: status.timestamp };
     case 'canonical':
       return { status: 'canonical', timestamp: status.timestamp };
+    case 'retained':
+      return { status: 'retained', timestamp: status.timestamp, reason: status.reason };
     case 'discarded':
-      return { status: 'discarded', timestamp: status.timestamp };
+      return { status: 'discarded', timestamp: status.timestamp, reason: status.reason };
   }
 }
 
 export function toServerProposalMetadata(meta: ProposalMetadata): ServerProposalMetadata {
   return {
-    proposal_type: meta.proposalType === 'unknown' ? undefined : meta.proposalType,
+    proposal_type: meta.proposalType,
     target_threshold: meta.targetThreshold,
     required_signatures: meta.requiredSignatures,
     signer_commitments: meta.signerCommitments,
@@ -197,9 +215,12 @@ export function toServerProposalMetadata(meta: ProposalMetadata): ServerProposal
     new_guardian_pubkey: meta.newGuardianPubkey,
     new_guardian_endpoint: meta.newGuardianEndpoint,
     note_ids: meta.noteIds,
+    consume_notes_metadata_version: meta.consumeNotesMetadataVersion,
+    consume_notes_notes: meta.consumeNotesNotes,
     recipient_id: meta.recipientId,
     faucet_id: meta.faucetId,
     amount: meta.amount,
+    note_type: meta.noteType,
   };
 }
 

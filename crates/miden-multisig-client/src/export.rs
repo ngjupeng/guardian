@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MultisigError, Result};
 use crate::keystore::{ensure_hex_prefix, word_from_hex};
-use crate::proposal::{Proposal, ProposalMetadata, ProposalSignatureEntry, ProposalStatus};
+use crate::proposal::{
+    Proposal, ProposalMetadata, ProposalSignatureEntry, ProposalStatus, SerializedNote,
+};
 use crate::utils::hex_body_eq;
 
 /// Current export format version.
@@ -84,8 +86,23 @@ pub struct ExportedMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u64>,
 
+    /// P2ID note visibility, `"public"` or `"private"` (issue #322).
+    /// Absent => public (pre-#322 exports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_type: Option<String>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_ids_hex: Vec<String>,
+
+    /// `consume_notes` proposal-metadata schema version (issue #229).
+    /// Mirrors `ProposalMetadataPayload::consume_notes_metadata_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consume_notes_metadata_version: Option<u32>,
+
+    /// `consume_notes` v2 embedded notes; base64 of Miden `Note`
+    /// serialization, aligned by index with `note_ids_hex`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consume_notes_notes: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_guardian_pubkey_hex: Option<String>,
@@ -108,7 +125,16 @@ impl ExportedProposal {
             recipient_hex: self.metadata.recipient_hex.clone(),
             faucet_id_hex: self.metadata.faucet_id_hex.clone(),
             amount: self.metadata.amount,
+            note_type: self.metadata.note_type.clone(),
             note_ids_hex: self.metadata.note_ids_hex.clone(),
+            consume_notes_metadata_version: self.metadata.consume_notes_metadata_version,
+            consume_notes_notes: self
+                .metadata
+                .consume_notes_notes
+                .iter()
+                .cloned()
+                .map(SerializedNote::from_base64)
+                .collect(),
             new_guardian_pubkey_hex: self.metadata.new_guardian_pubkey_hex.clone(),
             new_guardian_endpoint: self.metadata.new_guardian_endpoint.clone(),
             target_procedure: self.metadata.target_procedure.clone(),
@@ -258,7 +284,15 @@ impl ExportedProposal {
             recipient_hex: proposal.metadata.recipient_hex.clone(),
             faucet_id_hex: proposal.metadata.faucet_id_hex.clone(),
             amount: proposal.metadata.amount,
+            note_type: proposal.metadata.note_type.clone(),
             note_ids_hex: proposal.metadata.note_ids_hex.clone(),
+            consume_notes_metadata_version: proposal.metadata.consume_notes_metadata_version,
+            consume_notes_notes: proposal
+                .metadata
+                .consume_notes_notes
+                .iter()
+                .map(|n| n.as_str().to_owned())
+                .collect(),
             new_guardian_pubkey_hex: proposal.metadata.new_guardian_pubkey_hex.clone(),
             new_guardian_endpoint: proposal.metadata.new_guardian_endpoint.clone(),
             target_procedure: proposal.metadata.target_procedure.clone(),
@@ -459,7 +493,10 @@ mod tests {
             recipient_hex: None,
             faucet_id_hex: None,
             amount: None,
+            note_type: None,
             note_ids_hex: vec![],
+            consume_notes_metadata_version: None,
+            consume_notes_notes: Vec::new(),
             new_guardian_pubkey_hex: None,
             new_guardian_endpoint: None,
             target_procedure: None,
@@ -648,11 +685,11 @@ mod tests {
 
     // Helper for valid account ID (15 bytes = 30 hex chars)
     fn valid_account_id() -> String {
-        "0x7bfb0f38b0fafa103f86a805594170".to_string()
+        "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string()
     }
 
     fn valid_faucet_id() -> String {
-        "0x7bfb0f38b0fafa103f86a805594171".to_string()
+        "0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c".to_string()
     }
 
     // Helper for valid 32-byte hex (Word)
@@ -679,7 +716,7 @@ mod tests {
             account_delta,
             InputNotes::new(Vec::new()).expect("empty input notes"),
             RawOutputNotes::new(Vec::new()).expect("empty output notes"),
-            Word::from([Felt::new(7), ZERO, ZERO, ZERO]),
+            Word::from([Felt::new_unchecked(7), ZERO, ZERO, ZERO]),
         )
     }
 
@@ -714,6 +751,8 @@ mod tests {
             metadata: ExportedMetadata {
                 proposal_type: "consume_notes".to_string(),
                 note_ids_hex: vec![valid_note_id_hex()],
+                consume_notes_metadata_version: None,
+                consume_notes_notes: Vec::new(),
                 ..Default::default()
             },
         };
@@ -916,6 +955,35 @@ mod tests {
             imported.metadata.proposal_type.as_deref(),
             Some("add_signer")
         );
+    }
+
+    #[test]
+    fn from_proposal_roundtrip_preserves_custom_proposal_type() {
+        let tx_summary = create_test_tx_summary();
+        let proposal = Proposal::new(
+            tx_summary.clone(),
+            1,
+            TransactionType::Custom,
+            ProposalMetadata {
+                tx_summary_json: Some(tx_summary.to_json()),
+                proposal_type: Some("b2agg".to_string()),
+                required_signatures: Some(2),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(proposal.metadata.proposal_type.as_deref(), Some("b2agg"));
+
+        let account_id = AccountId::from_hex(&valid_account_id()).expect("valid account id");
+        let exported = ExportedProposal::from_proposal(&proposal, account_id)
+            .expect("custom proposal should export");
+        assert_eq!(exported.metadata.proposal_type, "b2agg");
+
+        let imported = exported
+            .to_proposal()
+            .expect("custom proposal should import");
+        assert_eq!(imported.transaction_type, TransactionType::Custom);
+        assert_eq!(imported.metadata.proposal_type.as_deref(), Some("b2agg"));
     }
 
     #[test]

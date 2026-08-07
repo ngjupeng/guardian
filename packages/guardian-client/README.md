@@ -69,6 +69,80 @@ console.log('Commitment:', state.commitment);
 console.log('State data:', state.state_json.data);
 ```
 
+### Abandon a Stuck Candidate
+
+If an approved transaction died client-side after guardian approval, its
+candidate keeps the account locked (`409 conflict_pending_delta` on new
+proposals). Record an abandon intent and poll for the resolution:
+
+```typescript
+const accepted = await client.abandonCandidate(accountId, nonce);
+console.log(accepted.state); // 'pending'
+
+// The guardian's worker confirms over a short quarantine that the tx did
+// not land, then releases the account.
+const status = await client.abandonStatus(accountId, nonce);
+// 'waiting' | 'landed' | 'abandoned' | 'retained' | 'unexpected'
+```
+
+`'retained'` means the guardian stopped actively verifying the candidate
+and released the account slot, but the on-chain outcome is still
+**uncertain**: background reconciliation may promote the delta to
+`canonical` until its retention TTL expires. It is "unlocked but
+unresolved" — never read it as "the transaction did not land". Sync and
+check the chain before replacing the slot, since a resubmission
+supersedes the retained delta and forfeits automatic recovery.
+
+| Status | Account locked? | Outcome known? | Client action |
+|---|---|---|---|
+| `candidate` | Yes | No | Wait, or request abandonment |
+| `retained` | No | No | Sync/check chain before replacing |
+| `discarded: client_abandoned` | No | Probably not landed; late reconciliation remains possible | Continue cautiously |
+| `canonical` | No | Yes — landed | Sync account state |
+
+### Look Up An Account By Key Commitment
+
+When a wallet only holds a signing key, it cannot derive the account ID
+directly. The Guardian server exposes `GET /state/lookup` so the wallet
+can ask "which account(s) authorize this commitment?" and proceed with
+the existing recovery flow.
+
+The signer used here MUST implement `signLookupMessage`, which signs the
+domain-separated `LookupAuthMessage::to_word(timestampMs, keyCommitment)`
+digest. The canonical implementation lives in
+`@openzeppelin/miden-multisig-client` (which has access to the Miden SDK's
+RPO256); this package keeps the digest computation out of its zero-dependency
+surface.
+
+```typescript
+const result = await client.lookupAccountByKeyCommitment(keyCommitmentHex);
+
+if (result.accounts.length === 0) {
+  console.log('No account authorizes this commitment with this operator.');
+} else {
+  for (const { accountId } of result.accounts) {
+    console.log('Recovered account:', accountId);
+    // Continue with the existing /state flow:
+    const state = await client.getState(accountId);
+    // ... register a new key via the existing delta/proposal flow.
+  }
+}
+```
+
+For a higher-level helper that composes lookup + state fetch, see
+`recoverByKey` in `@openzeppelin/miden-multisig-client`.
+
+#### Auth shape
+
+The lookup endpoint accepts the same `x-pubkey` / `x-signature` /
+`x-timestamp` headers as per-account requests for wire-format consistency,
+but identity is derived from the signature itself: Falcon signatures embed
+the public key, ECDSA signatures recover it via the recovery byte. The
+server then requires the derived key to commit to the queried
+`key_commitment`. This means the lookup endpoint works with wallet signers
+that only expose a 32-byte commitment as `publicKey` (e.g., the Miden
+browser wallet) — the signature is what proves possession.
+
 ### Work with Delta Proposals
 
 ```typescript

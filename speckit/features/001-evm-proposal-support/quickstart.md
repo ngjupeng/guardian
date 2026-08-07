@@ -1,106 +1,100 @@
-# Quickstart: Add generic EVM proposal sharing and signing support
+# Quickstart: Domain-separated EVM proposal support
 
-This quickstart is a validation-oriented walkthrough for the planned feature.
-It focuses on the agreed v1 shape for network-aware EVM proposal sharing and
-signing.
+## 1. Default Server Gate
 
-## 1. Configure a Miden account
+Run the default server and call any `/evm/*` route.
 
 Expected result:
 
-- request includes `network_config.kind = "miden"`
-- existing Miden auth and state validation still work
-- account metadata persists Miden-specific network configuration
+- the route is absent from the default router
+- no EVM session, metadata, contract read, or proposal write occurs
+- existing Miden `/configure`, `/delta`, `/delta/proposal`, and `/state` flows
+  continue to work
 
-## 2. Configure an EVM account
-
-Expected request shape:
-
-```json
-{
-  "account_id": "evm:1:0x0000000000000000000000000000000000000000",
-  "auth": {
-    "EvmEcdsa": {
-      "signers": []
-    }
-  },
-  "network_config": {
-    "kind": "evm",
-    "chain_id": 1,
-    "contract_address": "0x0000000000000000000000000000000000000000",
-    "rpc_endpoint": "https://rpc.example"
-  },
-  "initial_state": {}
-}
-```
-
-Expected result:
-
-- account configuration succeeds only if RPC-backed signer validation succeeds
-- `account_id` matches the canonical `chain_id + contract_address` identity
-- the server derives the EVM signer snapshot and threshold view from RPC
-- account metadata persists `network_config`
-- request-auth headers and replay protection still apply
-- for EVM accounts, request auth uses EIP-712 over a server-reconstructed
-  `AuthRequest(accountId, timestampMs, payloadHash)` message
-
-## 3. Create an EVM proposal
-
-Expected request shape:
-
-```json
-{
-  "account_id": "evm:1:0x0000000000000000000000000000000000000000",
-  "nonce": 1,
-  "delta_payload": {
-    "kind": "evm",
-    "mode": "0x0000000000000000000000000000000000000000000000000000000000000000",
-    "execution_calldata": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-    "signatures": []
-  }
-}
-```
-
-Expected result:
-
-- proposal create routes through the EVM proposal capability
-- signer authority is re-validated through RPC
-- payload is validated as an ERC-7579 `execute(mode, executionCalldata)` shape
-- non-empty submitted signature arrays are rejected on create
-- proposal is stored as `pending`
-- response returns a deterministic hash-based proposal identifier
-- repeated create of the same normalized proposal is idempotent
-
-## 4. List, get, and sign an EVM proposal
-
-Expected result:
-
-- list/get/sign routes stay aligned between HTTP and gRPC
-- proposal signatures use EIP-712 over `(mode, keccak256(execution_calldata))`
-- signer identities are normalized EOA addresses
-- repeated signatures by the same signer are rejected explicitly
-- request auth remains explicit and replay-protected
-
-## 5. Verify unsupported EVM flows
-
-Expected result:
-
-- `push_delta`
-- `get_delta`
-- `get_delta_since`
-- `get_state`
-- canonicalization paths
-
-all return explicit unsupported errors for EVM accounts and do not fall back to
-Miden behavior.
-
-## 6. Run validation
+## 2. EVM-enabled Server
 
 ```bash
-cargo test -p private-state-manager-server
-cargo test -p private-state-manager-client
-cd packages/guardian-client && npm test
+GUARDIAN_EVM_RPC_URLS=31337=http://127.0.0.1:8545 \
+GUARDIAN_EVM_ENTRYPOINT_ADDRESS=0x... \
+cargo run -p guardian-server --features evm --bin server
 ```
 
-Run example smoke checks only if the base-client changes propagate into example
-surfaces.
+## 3. Wallet Session
+
+```text
+GET  /evm/auth/challenge?address=0x...
+POST /evm/auth/verify { address, nonce, signature }
+POST /evm/auth/logout
+```
+
+Expected result:
+
+- Guardian recovers the EOA from the EIP-712 challenge signature
+- the nonce is consumed once
+- `guardian_evm_session` is set as an expiring cookie
+
+## 4. Register Account
+
+```text
+POST /evm/accounts
+```
+
+```json
+{
+  "chain_id": 31337,
+  "account_address": "0x...",
+  "multisig_validator_address": "0x..."
+}
+```
+
+Expected result:
+
+- Guardian derives `evm:<chain_id>:<account_address>`
+- RPC endpoints are resolved from the `GUARDIAN_EVM_RPC_URLS` map; the EntryPoint address is read from the single `GUARDIAN_EVM_ENTRYPOINT_ADDRESS` env var
+- `isModuleInstalled(1, validator, 0x)` succeeds
+- the session EOA is a current validator signer
+- signer snapshot and threshold are stored in metadata
+
+## 5. Coordinate Proposal
+
+```text
+POST /evm/proposals
+GET  /evm/proposals?account_id=...
+GET  /evm/proposals/{proposal_id}?account_id=...
+POST /evm/proposals/{proposal_id}/approve
+GET  /evm/proposals/{proposal_id}/executable?account_id=...
+POST /evm/proposals/{proposal_id}/cancel
+```
+
+Create request:
+
+```json
+{
+  "account_id": "evm:31337:0x...",
+  "user_op_hash": "0x...",
+  "payload": "{\"packedUserOperation\":{}}",
+  "nonce": "0",
+  "ttl_seconds": 900,
+  "signature": "0x..."
+}
+```
+
+Expected result:
+
+- initial and approval signatures recover to the session EOA
+- duplicate approvals fail explicitly
+- executable export fails with `insufficient_signatures` before threshold
+- executable export returns `{ hash, payload, signatures, signers }` after
+  threshold
+- expired/finalized proposals are lazily removed
+
+## 6. Validation
+
+```bash
+cargo test -p guardian-server
+cargo test -p guardian-server --features evm
+cargo check -p guardian-server --features postgres
+cargo check -p guardian-server --features postgres,evm
+cd packages/guardian-evm-client && npm test && npm run build
+cd examples/evm-smoke-web && npm run typecheck && npm run build
+```

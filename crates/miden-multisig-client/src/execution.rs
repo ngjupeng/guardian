@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use guardian_shared::SignatureScheme;
 use miden_client::account::Account;
 use miden_client::transaction::TransactionRequest;
-use miden_protocol::asset::FungibleAsset;
+use miden_protocol::account::AccountId;
+use miden_protocol::asset::{Asset, AssetCallbackFlag, FungibleAsset};
 use miden_protocol::{Felt, Word};
 
 use crate::MidenSdkClient;
@@ -84,6 +85,40 @@ pub fn collect_signature_advice(
     Ok(advice)
 }
 
+/// Builds the fungible asset to transfer, sourcing the callback flag from the held asset.
+///
+/// In Miden 0.15 the callback flag is part of the vault key, so rebuilding the asset from
+/// `faucet_id`/`amount` with the default flag would not match the held asset and the transfer would
+/// abort. When the faucet is absent the default flag is used, surfacing the missing-asset error.
+pub fn build_transfer_asset(
+    account: &Account,
+    faucet_id: AccountId,
+    amount: u64,
+) -> Result<FungibleAsset> {
+    let callbacks = held_callback_flag(account.vault().assets(), faucet_id);
+
+    FungibleAsset::new(faucet_id, amount)
+        .map(|asset| asset.with_callbacks(callbacks))
+        .map_err(|e| MultisigError::InvalidConfig(format!("failed to create asset: {}", e)))
+}
+
+/// Returns the callback flag of the held fungible asset issued by `faucet_id`,
+/// defaulting to `Disabled` when the faucet's asset is not present in the vault.
+fn held_callback_flag(
+    held_assets: impl IntoIterator<Item = Asset>,
+    faucet_id: AccountId,
+) -> AssetCallbackFlag {
+    held_assets
+        .into_iter()
+        .find_map(|asset| match asset {
+            Asset::Fungible(fungible) if fungible.faucet_id() == faucet_id => {
+                Some(fungible.callbacks())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// Builds the final transaction request based on transaction type.
 #[expect(
     clippy::too_many_arguments,
@@ -104,27 +139,80 @@ pub async fn build_final_transaction_request(
             recipient,
             faucet_id,
             amount,
+            note_type,
         } => {
-            let asset = FungibleAsset::new(*faucet_id, *amount).map_err(|e| {
-                MultisigError::InvalidConfig(format!("failed to create asset: {}", e))
-            })?;
+            let asset = build_transfer_asset(account, *faucet_id, *amount)?;
 
             crate::transaction::build_p2id_transaction_request(
                 account,
                 *recipient,
                 vec![asset.into()],
+                *note_type,
                 salt,
                 signature_advice,
             )
         }
-        TransactionType::ConsumeNotes { note_ids } => {
-            crate::transaction::build_consume_notes_transaction_request(
-                client,
-                note_ids.clone(),
-                salt,
-                signature_advice,
-            )
-            .await
+        TransactionType::ConsumeNotes {
+            note_ids,
+            metadata_version,
+            notes,
+        } => {
+            // v1/v2 dispatch for issue #229 / spec FR-009.
+            match metadata_version {
+                Some(crate::proposal::CONSUME_NOTES_METADATA_VERSION_V2) => {
+                    if notes.len() != note_ids.len() {
+                        return Err(MultisigError::NoteBindingMismatch(format!(
+                            "consume_notes v2: notes.len()={} does not match note_ids.len()={}",
+                            notes.len(),
+                            note_ids.len()
+                        )));
+                    }
+                    let mut decoded: Vec<miden_protocol::note::Note> =
+                        Vec::with_capacity(notes.len());
+                    for (i, serialized) in notes.iter().enumerate() {
+                        let note = serialized.to_note()?;
+                        if note.id() != note_ids[i] {
+                            return Err(MultisigError::NoteBindingMismatch(format!(
+                                "consume_notes v2: notes[{}] id {} != note_ids[{}] {}",
+                                i,
+                                note.id().to_hex(),
+                                i,
+                                note_ids[i].to_hex()
+                            )));
+                        }
+                        decoded.push(note);
+                    }
+                    crate::transaction::build_consume_notes_transaction_request_from_notes(
+                        decoded,
+                        salt,
+                        signature_advice,
+                    )
+                }
+                None | Some(1) => {
+                    #[cfg(feature = "legacy-consume-notes")]
+                    {
+                        crate::transaction::build_consume_notes_transaction_request(
+                            client,
+                            note_ids.clone(),
+                            salt,
+                            signature_advice,
+                        )
+                        .await
+                    }
+                    #[cfg(not(feature = "legacy-consume-notes"))]
+                    {
+                        let _ = (client, salt, signature_advice);
+                        // Preserve `Some(1)` vs `None` so the error tells the
+                        // operator which legacy shape was rejected.
+                        Err(MultisigError::UnsupportedMetadataVersion {
+                            found: *metadata_version,
+                        })
+                    }
+                }
+                Some(other) => Err(MultisigError::UnsupportedMetadataVersion {
+                    found: Some(*other),
+                }),
+            }
         }
         TransactionType::SwitchGuardian { new_commitment, .. } => {
             crate::transaction::build_update_guardian_transaction_request(
@@ -168,6 +256,9 @@ pub async fn build_final_transaction_request(
 
             Ok(tx_request)
         }
+        TransactionType::Custom => Err(MultisigError::UnsupportedTransactionType(
+            "cannot build a transaction for a custom proposal type".to_string(),
+        )),
     }
 }
 
@@ -247,5 +338,47 @@ mod tests {
 
         let advice = collect_signature_advice(signatures, &required, msg).expect("valid advice");
         assert_eq!(advice.len(), 1);
+    }
+
+    fn faucet(id: u128) -> AccountId {
+        AccountId::try_from(id).expect("valid faucet id")
+    }
+
+    #[test]
+    fn held_callback_flag_preserves_enabled_flag_from_vault() {
+        use miden_client::testing::account_id::ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1;
+
+        let faucet_id = faucet(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1);
+        let held = FungibleAsset::new(faucet_id, 100)
+            .unwrap()
+            .with_callbacks(AssetCallbackFlag::Enabled);
+
+        let flag = held_callback_flag([Asset::Fungible(held)], faucet_id);
+        assert_eq!(flag, AssetCallbackFlag::Enabled);
+    }
+
+    #[test]
+    fn held_callback_flag_defaults_to_disabled_when_faucet_absent() {
+        use miden_client::testing::account_id::{
+            ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1, ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_2,
+        };
+
+        let held = FungibleAsset::new(faucet(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1), 100)
+            .unwrap()
+            .with_callbacks(AssetCallbackFlag::Enabled);
+
+        let flag = held_callback_flag(
+            [Asset::Fungible(held)],
+            faucet(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_2),
+        );
+        assert_eq!(flag, AssetCallbackFlag::Disabled);
+    }
+
+    #[test]
+    fn held_callback_flag_defaults_to_disabled_on_empty_vault() {
+        use miden_client::testing::account_id::ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1;
+
+        let flag = held_callback_flag([], faucet(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET_1));
+        assert_eq!(flag, AssetCallbackFlag::Disabled);
     }
 }

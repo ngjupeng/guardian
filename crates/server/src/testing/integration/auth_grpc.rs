@@ -1,6 +1,7 @@
 use crate::testing::helpers::{
-    TestSigner, create_grpc_service, create_miden_falcon_rpo_auth, create_signed_request_with_auth,
-    create_test_app_state, load_fixture_account_grpc as load_fixture_account, load_fixture_delta,
+    TestSigner, create_grpc_service, create_miden_falcon_rpo_auth, create_miden_network_config,
+    create_signed_request_with_auth, create_test_app_state,
+    load_fixture_account_grpc as load_fixture_account, load_fixture_delta,
 };
 use tonic::Request;
 
@@ -21,6 +22,7 @@ async fn test_grpc_configure_and_push_delta_with_auth() {
         auth: Some(create_miden_falcon_rpo_auth(vec![
             signer.commitment_hex.clone(),
         ])),
+        network_config: Some(create_miden_network_config()),
         initial_state,
     };
 
@@ -75,6 +77,7 @@ async fn test_grpc_push_delta_unauthorized_cosigner() {
         auth: Some(create_miden_falcon_rpo_auth(vec![
             authorized_signer.commitment_hex.clone(),
         ])), // Only this key is authorized
+        network_config: Some(create_miden_network_config()),
         initial_state,
     };
 
@@ -100,17 +103,18 @@ async fn test_grpc_push_delta_unauthorized_cosigner() {
     let request = create_signed_request_with_auth(push_req, &account_id_hex, &unauthorized_signer);
     let push_response = service.push_delta(request).await;
 
-    // Should succeed as a gRPC call but return failure in response
-    assert!(push_response.is_ok(), "gRPC call should succeed");
-    let push_response = push_response.unwrap().into_inner();
-    assert!(
-        !push_response.success,
-        "Push should fail with unauthorized cosigner"
-    );
-    assert!(
-        push_response.message.contains("not authorized"),
-        "Error message should mention authorization"
-    );
+    // Errors now surface as a gRPC Status (feature 009), not an in-band
+    // success=false response.
+    let status = push_response.expect_err("unauthorized push must be a gRPC error status");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    // Status.message is the user-safe sentence; the raw "not authorized"
+    // detail is logged server-side, not returned.
+    assert!(!status.message().is_empty());
+    let details: serde_json::Value =
+        serde_json::from_slice(status.details()).expect("Status.details is JSON");
+    assert!(details["code"].is_string(), "details carry a stable code");
+    assert!(details["message"].is_string());
+    assert_eq!(details["meta"]["retryable"], serde_json::Value::Bool(false));
 }
 
 #[tokio::test]
@@ -127,6 +131,7 @@ async fn test_grpc_push_delta_missing_auth_metadata() {
         auth: Some(create_miden_falcon_rpo_auth(vec![
             signer.commitment_hex.clone(),
         ])),
+        network_config: Some(create_miden_network_config()),
         initial_state,
     };
 
@@ -183,6 +188,7 @@ async fn test_grpc_get_delta_with_auth() {
         auth: Some(create_miden_falcon_rpo_auth(vec![
             signer.commitment_hex.clone(),
         ])),
+        network_config: Some(create_miden_network_config()),
         initial_state,
     };
 

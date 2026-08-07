@@ -1,9 +1,11 @@
 use crate::delta_object::DeltaObject;
+use crate::error::GuardianError;
+use crate::metadata::NetworkConfig;
 use crate::metadata::auth::{Auth, AuthHeader, Credentials};
 use crate::services::{
-    self, ConfigureAccountParams, GetDeltaParams, GetDeltaProposalParams, GetDeltaProposalsParams,
-    GetDeltaSinceParams, GetStateParams, PushDeltaParams, PushDeltaProposalParams,
-    SignDeltaProposalParams,
+    self, AbandonCandidateParams, ConfigureAccountParams, GetDeltaParams, GetDeltaProposalParams,
+    GetDeltaProposalsParams, GetDeltaSinceParams, GetStateParams, LookupAccountParams,
+    PushDeltaParams, PushDeltaProposalParams, SignDeltaProposalParams,
 };
 use crate::state::AppState;
 use crate::state_object::StateObject;
@@ -12,10 +14,14 @@ use guardian_shared::auth_request_payload::AuthRequestPayload;
 use guardian_shared::{ProposalSignature, SignatureScheme};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ConfigureRequest {
     pub account_id: String,
     pub auth: Auth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_config: Option<NetworkConfig>,
+    /// Opaque, schema-free JSON blob describing the initial account state.
+    #[schema(value_type = Object)]
     pub initial_state: serde_json::Value,
 }
 
@@ -24,6 +30,9 @@ impl From<ConfigureRequest> for ConfigureAccountParams {
         Self {
             account_id: req.account_id,
             auth: req.auth,
+            network_config: req
+                .network_config
+                .unwrap_or_else(NetworkConfig::miden_default),
             initial_state: req.initial_state,
             // Credential will be set from AuthHeader
             credential: Credentials::signature(String::new(), String::new(), 0),
@@ -31,36 +40,87 @@ impl From<ConfigureRequest> for ConfigureAccountParams {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DeltaQuery {
     pub account_id: String,
     pub nonce: u64,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct StateQuery {
     pub account_id: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LookupQuery {
+    pub key_commitment: String,
+}
+
+/// Single match in a lookup response. Wraps `account_id` so the response shape
+/// can be extended in a forward-compatible way (e.g. adding role tags or
+/// per-account metadata) without breaking existing clients.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LookupAccount {
+    pub account_id: String,
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LookupResponse {
+    pub accounts: Vec<LookupAccount>,
+}
+
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ProposalQuery {
     pub account_id: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ProposalItemQuery {
     pub account_id: String,
     pub commitment: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DeltaProposalRequest {
     pub account_id: String,
     pub nonce: u64,
+    /// Opaque, schema-free multisig proposal payload.
+    #[schema(value_type = Object)]
     pub delta_payload: serde_json::Value,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+pub struct AbandonCandidateRequest {
+    pub account_id: String,
+    /// Nonce of the candidate delta to abandon. Requiring the explicit
+    /// target prevents a stale request from releasing a newer candidate.
+    pub nonce: u64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AbandonCandidateResponse {
+    pub account_id: String,
+    pub nonce: u64,
+    /// `"pending"` while the worker still has to resolve the intent
+    /// (the account stays locked until then); `"abandoned"` once the
+    /// delta is discarded as client-abandoned and the account released;
+    /// `"retained"` when the worker had already stopped verifying the
+    /// candidate and released the account — unlocked, but the on-chain
+    /// outcome is still uncertain and background reconciliation may yet
+    /// promote the delta until its retention TTL expires.
+    pub state: String,
+    /// RFC 3339 UTC timestamp of the recorded abandon request. Retries
+    /// return the original timestamp; absent once resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abandon_requested_at: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct SignProposalRequest {
     pub account_id: String,
     pub commitment: String,
@@ -68,42 +128,57 @@ pub struct SignProposalRequest {
 }
 
 // Response types
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ConfigureResponse {
     pub success: bool,
     pub message: String,
     pub ack_pubkey: Option<String>,
     pub ack_commitment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
-#[derive(Serialize)]
-pub struct ErrorResponse {
-    pub success: bool,
-    pub error: String,
-}
-
+/// Configure (register) an account with its authorization set and
+/// initial state. Requires the signed `x-pubkey` / `x-signature` /
+/// `x-timestamp` auth headers.
+#[utoipa::path(
+    post,
+    path = "/configure",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    request_body = ConfigureRequest,
+    responses(
+        (status = 200, description = "Account configured", body = ConfigureResponse),
+        (status = 400, description = "Invalid request", body = ConfigureResponse),
+    )
+)]
 pub async fn configure(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Json(payload): Json<ConfigureRequest>,
 ) -> (StatusCode, Json<ConfigureResponse>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&payload) {
+    let request_payload = match request_payload_from_serializable(&payload) {
         Ok(request_payload) => request_payload,
         Err(e) => {
+            // Log the raw detail; return only the user-safe message + stable
+            // code (feature 009-human-readable-errors).
+            let err = GuardianError::InvalidInput(e);
+            tracing::debug!(code = err.code(), detail = %err, "configure request invalid");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ConfigureResponse {
                     success: false,
-                    message: e,
+                    message: err.user_message().to_string(),
                     ack_pubkey: None,
                     ack_commitment: None,
+                    code: Some(err.code()),
                 }),
             );
         }
     };
 
     let mut params = ConfigureAccountParams::from(payload);
-    params.credential = credentials.with_request_payload(request_payload);
+    params.credential = request_payload.apply_to(credentials);
 
     match services::configure_account(&state, params).await {
         Ok(response) => (
@@ -113,198 +188,249 @@ pub async fn configure(
                 message: format!("Account '{}' configured successfully", response.account_id),
                 ack_pubkey: Some(response.ack_pubkey),
                 ack_commitment: Some(response.ack_commitment),
+                code: None,
             }),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(ConfigureResponse {
-                success: false,
-                message: e.to_string(),
-                ack_pubkey: None,
-                ack_commitment: None,
-            }),
-        ),
+        Err(e) => {
+            // The diagnostic Display string is logged, not returned; the wire
+            // carries only the user-safe message + stable code (feature 009).
+            if e.http_status().is_server_error() {
+                tracing::error!(code = e.code(), detail = %e, "configure failed (5xx)");
+            } else {
+                tracing::debug!(code = e.code(), detail = %e, "configure rejected (4xx)");
+            }
+            (
+                e.http_status(),
+                Json(ConfigureResponse {
+                    success: false,
+                    message: e.user_message().to_string(),
+                    ack_pubkey: None,
+                    ack_commitment: None,
+                    code: Some(e.code()),
+                }),
+            )
+        }
     }
 }
 
+/// Push a signed state delta for a single-key account. The request
+/// body is the JSON-encoded [`DeltaObject`] to commit.
+#[utoipa::path(
+    post,
+    path = "/delta",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    request_body = DeltaObject,
+    responses(
+        (status = 200, description = "Delta accepted", body = DeltaObject),
+        (status = 400, description = "Invalid delta payload", body = crate::openapi::ApiErrorResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 409, description = "Conflicting pending delta/proposal", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn push_delta(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Json(payload): Json<serde_json::Value>,
-) -> (StatusCode, Json<DeltaObject>) {
-    let request_payload = match AuthRequestPayload::from_json_value(&payload) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_value(&payload).map_err(GuardianError::InvalidInput)?;
 
-    let delta: DeltaObject = match serde_json::from_value(payload) {
-        Ok(delta) => delta,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: format!("Invalid delta payload: {e}"),
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+    let delta: DeltaObject = serde_json::from_value(payload)
+        .map_err(|e| GuardianError::InvalidInput(format!("Invalid delta payload: {e}")))?;
 
     let params = PushDeltaParams {
         delta,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::push_delta(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.delta)),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(DeltaObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
-    }
+    let response = services::push_delta(&state, params).await?;
+    Ok(Json(response.delta))
 }
 
+/// Fetch the delta for an account at a specific nonce.
+#[utoipa::path(
+    get,
+    path = "/delta",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(DeltaQuery),
+    responses(
+        (status = 200, description = "Delta found", body = DeltaObject),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "Delta not found", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn get_delta(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Query(query): Query<DeltaQuery>,
-) -> (StatusCode, Json<DeltaObject>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&query) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaParams {
         account_id: query.account_id,
         nonce: query.nonce,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::get_delta(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.delta)),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(DeltaObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
-    }
+    let response = services::get_delta(&state, params).await?;
+    Ok(Json(response.delta))
 }
 
+/// Fetch the merged delta accumulating all changes for an account
+/// since (and excluding) the given nonce.
+#[utoipa::path(
+    get,
+    path = "/delta/since",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(DeltaQuery),
+    responses(
+        (status = 200, description = "Merged delta", body = DeltaObject),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "No deltas found", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn get_delta_since(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Query(query): Query<DeltaQuery>,
-) -> (StatusCode, Json<DeltaObject>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&query) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaSinceParams {
         account_id: query.account_id,
         from_nonce: query.nonce,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::get_delta_since(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.merged_delta)),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(DeltaObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
-    }
+    let response = services::get_delta_since(&state, params).await?;
+    Ok(Json(response.merged_delta))
 }
 
+/// Fetch the latest canonical state object for an account.
+#[utoipa::path(
+    get,
+    path = "/state",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(StateQuery),
+    responses(
+        (status = 200, description = "Current account state", body = StateObject),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "State not found", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn get_state(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Query(query): Query<StateQuery>,
-) -> (StatusCode, Json<StateObject>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&query) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(StateObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<StateObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetStateParams {
         account_id: query.account_id,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::get_state(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.state)),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(StateObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
-    }
+    let response = services::get_state(&state, params).await?;
+    Ok(Json(response.state))
 }
 
-#[derive(Serialize)]
+/// `GET /state/lookup?key_commitment=<hex>` — resolves a Miden public-key
+/// commitment to the set of account IDs whose authorization set contains it.
+/// Authentication is by proof-of-possession against the queried commitment.
+#[utoipa::path(
+    get,
+    path = "/state/lookup",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(LookupQuery),
+    responses(
+        (status = 200, description = "Accounts whose authorization set contains the commitment", body = LookupResponse),
+        (status = 400, description = "Malformed key commitment", body = crate::openapi::ApiErrorResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 500, description = "Storage error", body = crate::openapi::ApiErrorResponse),
+    )
+)]
+pub async fn lookup(
+    State(state): State<AppState>,
+    AuthHeader(credentials): AuthHeader,
+    Query(query): Query<LookupQuery>,
+) -> Result<Json<LookupResponse>, GuardianError> {
+    let params = LookupAccountParams {
+        key_commitment: query.key_commitment,
+        credentials,
+    };
+    let result = services::lookup_account(&state, params).await?;
+    Ok(Json(LookupResponse {
+        accounts: result
+            .accounts
+            .into_iter()
+            .map(|account_id| LookupAccount { account_id })
+            .collect(),
+    }))
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct PubkeyResponse {
     pub commitment: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ProposalsResponse {
     pub proposals: Vec<DeltaObject>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct DeltaProposalResponse {
     pub delta: DeltaObject,
     pub commitment: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PubkeyQuery {
     pub scheme: Option<String>,
 }
 
+/// Public, unauthenticated liveness + identity probe. Returns the
+/// server's version, git commit, environment, start time, and uptime.
+/// Consumed by wallet clients (pre-auth health check) and the status
+/// homepage. Exposes no account, operator, or auth data.
+#[utoipa::path(
+    get,
+    path = "/status",
+    tag = "client",
+    responses(
+        (status = 200, description = "Server liveness, version, and environment", body = crate::services::StatusResponse),
+    )
+)]
+pub async fn status(State(state): State<AppState>) -> Json<crate::services::StatusResponse> {
+    Json(crate::services::build_status(
+        state.dashboard.environment(),
+        state.dashboard.started_at(),
+        state.clock.now(),
+    ))
+}
+
+/// Return the Guardian acknowledgement (ACK) public key / commitment
+/// for the requested signature scheme (`falcon` default, or `ecdsa`).
+#[utoipa::path(
+    get,
+    path = "/pubkey",
+    tag = "client",
+    params(PubkeyQuery),
+    responses(
+        (status = 200, description = "ACK public key / commitment", body = PubkeyResponse),
+    )
+)]
 pub async fn get_pubkey(
     State(state): State<AppState>,
     Query(query): Query<PubkeyQuery>,
@@ -322,163 +448,245 @@ pub async fn get_pubkey(
     (StatusCode::OK, Json(PubkeyResponse { commitment, pubkey }))
 }
 
+/// Create a new multisig delta proposal for cosigners to sign.
+#[utoipa::path(
+    post,
+    path = "/delta/proposal",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    request_body = DeltaProposalRequest,
+    responses(
+        (status = 200, description = "Proposal created", body = DeltaProposalResponse),
+        (status = 400, description = "Invalid proposal payload", body = crate::openapi::ApiErrorResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 409, description = "Conflicting / too many pending proposals", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn push_delta_proposal(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Json(payload): Json<DeltaProposalRequest>,
-) -> (StatusCode, Json<DeltaProposalResponse>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&payload) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaProposalResponse {
-                    delta: DeltaObject {
-                        account_id: e,
-                        ..Default::default()
-                    },
-                    commitment: String::new(),
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaProposalResponse>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let params = PushDeltaProposalParams {
         account_id: payload.account_id,
         nonce: payload.nonce,
         delta_payload: payload.delta_payload,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::push_delta_proposal(&state, params).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(DeltaProposalResponse {
-                delta: response.delta,
-                commitment: response.commitment,
-            }),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(DeltaProposalResponse {
-                delta: DeltaObject {
-                    account_id: e.to_string(),
-                    ..Default::default()
-                },
-                commitment: String::new(),
-            }),
-        ),
-    }
+    let response = services::push_delta_proposal(&state, params).await?;
+    Ok(Json(DeltaProposalResponse {
+        delta: response.delta,
+        commitment: response.commitment,
+    }))
 }
 
+/// Request abandonment of a pending canonicalization candidate whose
+/// transaction will never land on-chain (issue #319).
+///
+/// The request records an abandon *intent* and returns `202 Accepted`;
+/// the delta stays a candidate — the account stays locked — until the
+/// canonicalization worker confirms over the abandon quarantine that the
+/// transaction did not land, then discards the delta as
+/// `client_abandoned` and releases the account (typically well under a
+/// minute, versus the full submission grace + retry window).
+///
+/// Refused with `GUARDIAN_CANDIDATE_LANDED` (409) when the transaction
+/// already landed. Retries are idempotent and preserve the original
+/// request timestamp. Poll `GET /delta` for the resolution: still
+/// `candidate` → waiting; `canonical` → landed after all; `discarded`
+/// with reason `client_abandoned` → abandoned; `retained` → the worker
+/// already released the account, but the outcome is still uncertain
+/// (reconciliation may promote it until the retention TTL expires).
+#[utoipa::path(
+    post,
+    path = "/delta/candidate/abandon",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    request_body = AbandonCandidateRequest,
+    responses(
+        (status = 202, description = "Abandon intent accepted (or already resolved)", body = AbandonCandidateResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "No candidate delta at this nonce", body = crate::openapi::ApiErrorResponse),
+        (status = 409, description = "Candidate already landed on-chain, or account paused/released", body = crate::openapi::ApiErrorResponse),
+    )
+)]
+pub async fn abandon_candidate(
+    State(state): State<AppState>,
+    AuthHeader(credentials): AuthHeader,
+    Json(payload): Json<AbandonCandidateRequest>,
+) -> Result<(StatusCode, Json<AbandonCandidateResponse>), GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
+
+    let params = AbandonCandidateParams {
+        account_id: payload.account_id,
+        nonce: payload.nonce,
+        credentials: request_payload.apply_to(credentials),
+    };
+
+    let response = services::abandon_candidate(&state, params).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AbandonCandidateResponse {
+            account_id: response.account_id,
+            nonce: response.nonce,
+            state: response.state.as_str().to_string(),
+            abandon_requested_at: response.abandon_requested_at,
+        }),
+    ))
+}
+
+/// List all in-flight multisig proposals for an account.
+#[utoipa::path(
+    get,
+    path = "/delta/proposal",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(ProposalQuery),
+    responses(
+        (status = 200, description = "Pending proposals", body = ProposalsResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn get_delta_proposals(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Query(query): Query<ProposalQuery>,
-) -> (StatusCode, Json<ProposalsResponse>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&query) {
-        Ok(request_payload) => request_payload,
-        Err(_e) => {
-            return (
-                StatusCode::OK,
-                Json(ProposalsResponse {
-                    proposals: Vec::new(),
-                }),
-            );
-        }
-    };
+) -> Result<Json<ProposalsResponse>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaProposalsParams {
         account_id: query.account_id,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::get_delta_proposals(&state, params).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(ProposalsResponse {
-                proposals: response.proposals,
-            }),
-        ),
-        Err(_e) => (
-            StatusCode::OK,
-            Json(ProposalsResponse {
-                proposals: Vec::new(),
-            }),
-        ),
-    }
+    let response = services::get_delta_proposals(&state, params).await?;
+    Ok(Json(ProposalsResponse {
+        proposals: response.proposals,
+    }))
 }
 
+/// Fetch a single multisig proposal by its commitment.
+#[utoipa::path(
+    get,
+    path = "/delta/proposal/single",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    params(ProposalItemQuery),
+    responses(
+        (status = 200, description = "Proposal found", body = DeltaObject),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "Proposal not found", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn get_delta_proposal(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Query(query): Query<ProposalItemQuery>,
-) -> (StatusCode, Json<DeltaObject>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&query) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&query).map_err(GuardianError::InvalidInput)?;
 
     let params = GetDeltaProposalParams {
         account_id: query.account_id,
         commitment: query.commitment,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::get_delta_proposal(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.proposal)),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(DeltaObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
-    }
+    let response = services::get_delta_proposal(&state, params).await?;
+    Ok(Json(response.proposal))
 }
 
+/// Add a cosigner signature to an existing multisig proposal. When the
+/// signature threshold is reached the proposal is promoted to a delta.
+#[utoipa::path(
+    put,
+    path = "/delta/proposal",
+    tag = "client",
+    security(("x-pubkey" = [], "x-signature" = [], "x-timestamp" = [])),
+    request_body = SignProposalRequest,
+    responses(
+        (status = 200, description = "Signature accepted", body = DeltaObject),
+        (status = 400, description = "Invalid signature", body = crate::openapi::ApiErrorResponse),
+        (status = 401, description = "Authentication failed", body = crate::openapi::ApiErrorResponse),
+        (status = 404, description = "Proposal not found", body = crate::openapi::ApiErrorResponse),
+        (status = 409, description = "Proposal already signed by this signer", body = crate::openapi::ApiErrorResponse),
+    )
+)]
 pub async fn sign_delta_proposal(
     State(state): State<AppState>,
     AuthHeader(credentials): AuthHeader,
     Json(payload): Json<SignProposalRequest>,
-) -> (StatusCode, Json<DeltaObject>) {
-    let request_payload = match AuthRequestPayload::from_json_serializable(&payload) {
-        Ok(request_payload) => request_payload,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(DeltaObject {
-                    account_id: e,
-                    ..Default::default()
-                }),
-            );
-        }
-    };
+) -> Result<Json<DeltaObject>, GuardianError> {
+    let request_payload =
+        request_payload_from_serializable(&payload).map_err(GuardianError::InvalidInput)?;
 
     let params = SignDeltaProposalParams {
         account_id: payload.account_id,
         commitment: payload.commitment,
         signature: payload.signature,
-        credentials: credentials.with_request_payload(request_payload),
+        credentials: request_payload.apply_to(credentials),
     };
 
-    match services::sign_delta_proposal(&state, params).await {
-        Ok(response) => (StatusCode::OK, Json(response.delta)),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(DeltaObject {
-                account_id: e.to_string(),
-                ..Default::default()
-            }),
-        ),
+    let response = services::sign_delta_proposal(&state, params).await?;
+    Ok(Json(response.delta))
+}
+
+struct RequestPayloadParts {
+    payload: AuthRequestPayload,
+    bytes: Vec<u8>,
+}
+
+impl RequestPayloadParts {
+    fn apply_to(self, credentials: Credentials) -> Credentials {
+        credentials
+            .with_request_payload(self.payload)
+            .with_request_payload_bytes(self.bytes)
+    }
+}
+
+fn request_payload_from_serializable<T: Serialize>(
+    value: &T,
+) -> Result<RequestPayloadParts, String> {
+    let json = serde_json::to_value(value)
+        .map_err(|e| format!("Failed to convert payload to JSON value: {e}"))?;
+    request_payload_from_value(&json)
+}
+
+fn request_payload_from_value(value: &serde_json::Value) -> Result<RequestPayloadParts, String> {
+    let canonical = canonicalize_json(value);
+    let bytes =
+        serde_json::to_vec(&canonical).map_err(|e| format!("Failed to serialize JSON: {e}"))?;
+    Ok(RequestPayloadParts {
+        payload: AuthRequestPayload::from_bytes(&bytes),
+        bytes,
+    })
+}
+
+fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+
+            let mut sorted = serde_json::Map::with_capacity(map.len());
+            for key in keys {
+                let item = map
+                    .get(&key)
+                    .expect("key collected from map must always exist");
+                sorted.insert(key, canonicalize_json(item));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize_json).collect())
+        }
+        _ => value.clone(),
     }
 }
 
@@ -492,7 +700,6 @@ mod tests {
     use crate::testing::helpers::{TestSigner, create_test_app_state_with_mocks};
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     fn create_test_state() -> (
         AppState,
@@ -506,11 +713,50 @@ mod tests {
 
         let state = create_test_app_state_with_mocks(
             Arc::new(storage.clone()),
-            Arc::new(Mutex::new(network.clone())),
+            Arc::new(network.clone()),
             Arc::new(metadata.clone()),
         );
 
         (state, storage, network, metadata)
+    }
+
+    #[tokio::test]
+    async fn status_route_returns_ok_without_auth() {
+        use crate::testing::helpers::create_router;
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, ..) = create_test_state();
+        let app = create_router(state);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("status request should succeed");
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("status body should read");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("status body should be JSON");
+
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string());
+        assert!(json["environment"].is_string());
+        assert!(json["started_at"].is_string());
+        assert!(json["uptime_seconds"].is_number());
+        // Must not leak any dashboard/inventory fields.
+        assert!(json.get("total_account_count").is_none());
+        assert!(json.get("accounts_by_auth_method").is_none());
     }
 
     fn create_account_metadata(
@@ -522,10 +768,14 @@ mod tests {
             auth: Auth::MidenFalconRpo {
                 cosigner_commitments,
             },
+            network_config: crate::metadata::NetworkConfig::miden_default(),
             created_at: "2024-11-14T12:00:00Z".to_string(),
             updated_at: "2024-11-14T12:00:00Z".to_string(),
             has_pending_candidate: false,
             last_auth_timestamp: None,
+            paused_at: None,
+            paused_reason: None,
+            released_at: None,
         }
     }
 
@@ -560,6 +810,7 @@ mod tests {
             ack_pubkey: String::new(),
             ack_scheme: String::new(),
             status: DeltaStatus::canonical("2024-11-14T12:00:00Z".to_string()),
+            metadata: None,
         }
     }
 
@@ -604,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn test_configure_success() {
         let (state, _storage, _network, _metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -615,6 +866,7 @@ mod tests {
             auth: Auth::MidenFalconRpo {
                 cosigner_commitments: vec![commitment],
             },
+            network_config: None,
             initial_state: account_json,
         };
 
@@ -631,7 +883,7 @@ mod tests {
     #[tokio::test]
     async fn test_push_delta_proposal_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -665,18 +917,117 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &request);
-        let (status, Json(response)) =
-            push_delta_proposal(State(state), AuthHeader(credentials), Json(request)).await;
+        let Json(response) =
+            push_delta_proposal(State(state), AuthHeader(credentials), Json(request))
+                .await
+                .expect("push_delta_proposal should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.delta.nonce, 1);
         assert!(!response.commitment.is_empty());
+    }
+
+    fn abandon_test_fixtures(
+        storage: &MockStorageBackend,
+        network: &MockNetworkClient,
+        metadata: &MockMetadataStore,
+        account_id: &str,
+        signer: &TestSigner,
+        landed: bool,
+    ) {
+        let account_json: serde_json::Value = serde_json::from_str(fixtures::ACCOUNT_JSON).unwrap();
+        let mut candidate = create_test_delta(account_id, 1);
+        candidate.status = DeltaStatus::candidate("2024-11-14T12:00:00Z".to_string());
+
+        let _ = metadata.clone().with_get(Ok(Some(create_account_metadata(
+            account_id.to_string(),
+            vec![signer.commitment_hex.clone()],
+        ))));
+        let _ = storage
+            .clone()
+            .with_pull_delta(Ok(candidate))
+            .with_pull_state(Ok(create_state_object(
+                account_id.to_string(),
+                "0x780aa2edb983c1baab3c81edcfe400bc54b516d5cb51f2a7cec4690667329392".to_string(),
+                account_json,
+            )));
+        let verify = if landed {
+            Ok(crate::network::StateVerification::Match)
+        } else {
+            Ok(crate::network::StateVerification::Mismatch {
+                on_chain: "0x780aa2edb983c1baab3c81edcfe400bc54b516d5cb51f2a7cec4690667329392"
+                    .to_string(),
+            })
+        };
+        let _ = network
+            .clone()
+            .with_apply_delta(Ok((serde_json::json!({"new": true}), "0xnew".to_string())))
+            .with_verify_commitment(verify);
+    }
+
+    #[tokio::test]
+    async fn test_abandon_candidate_success() {
+        let (state, storage, network, metadata) = create_test_state();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
+        let signer = TestSigner::new();
+        abandon_test_fixtures(&storage, &network, &metadata, &account_id, &signer, false);
+
+        let request = AbandonCandidateRequest {
+            account_id: account_id.clone(),
+            nonce: 1,
+        };
+        let credentials = signed_credentials(&signer, &account_id, &request);
+        let (status, Json(response)) =
+            abandon_candidate(State(state), AuthHeader(credentials), Json(request))
+                .await
+                .expect("abandon_candidate should succeed");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response.account_id, account_id);
+        assert_eq!(response.nonce, 1);
+        assert_eq!(response.state, "pending");
+        assert!(response.abandon_requested_at.is_some());
+        // Intent only: nothing is deleted at request time.
+        assert!(storage.get_delete_delta_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_abandon_candidate_landed_maps_to_409_envelope() {
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse;
+
+        let (state, storage, network, metadata) = create_test_state();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
+        let signer = TestSigner::new();
+        abandon_test_fixtures(&storage, &network, &metadata, &account_id, &signer, true);
+
+        let request = AbandonCandidateRequest {
+            account_id: account_id.clone(),
+            nonce: 1,
+        };
+        let credentials = signed_credentials(&signer, &account_id, &request);
+        let err = abandon_candidate(State(state), AuthHeader(credentials), Json(request))
+            .await
+            .expect_err("landed candidate must refuse the abandon");
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON envelope");
+        assert_eq!(parsed["code"], "GUARDIAN_CANDIDATE_LANDED");
+        assert!(
+            parsed["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "user-safe message present"
+        );
+        assert_eq!(parsed["meta"]["retryable"], serde_json::Value::Bool(false));
+        assert!(storage.get_delete_delta_calls().is_empty());
     }
 
     #[tokio::test]
     async fn test_push_delta_proposal_missing_tx_summary() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -707,16 +1058,20 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &request);
-        let (status, _response) =
+        let result =
             push_delta_proposal(State(state), AuthHeader(credentials), Json(request)).await;
+        let err = match result {
+            Ok(_) => panic!("missing tx_summary should reject"),
+            Err(err) => err,
+        };
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn test_get_delta_proposals_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -742,6 +1097,7 @@ mod tests {
                 "2024-11-14T12:00:00Z".to_string(),
                 signer.pubkey_hex.clone(),
             ),
+            metadata: None,
         };
 
         let _storage = storage.with_pull_all_delta_proposals(Ok(vec![pending_delta]));
@@ -751,10 +1107,11 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_delta_proposals(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) =
+            get_delta_proposals(State(state), AuthHeader(credentials), Query(query))
+                .await
+                .expect("get_delta_proposals should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.proposals.len(), 1);
         assert_eq!(response.proposals[0].account_id, account_id);
     }
@@ -762,7 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_delta_proposals_empty() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -778,17 +1135,18 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_delta_proposals(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) =
+            get_delta_proposals(State(state), AuthHeader(credentials), Query(query))
+                .await
+                .expect("get_delta_proposals should succeed with empty result");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.proposals.len(), 0);
     }
 
     #[tokio::test]
     async fn test_get_delta_proposal_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -813,6 +1171,7 @@ mod tests {
                 "2024-11-14T12:00:00Z".to_string(),
                 signer.pubkey_hex.clone(),
             ),
+            metadata: None,
         };
 
         let _storage = storage.with_pull_delta_proposal(Ok(pending_delta));
@@ -823,10 +1182,11 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_delta_proposal(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) =
+            get_delta_proposal(State(state), AuthHeader(credentials), Query(query))
+                .await
+                .expect("get_delta_proposal should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.account_id, account_id);
         assert_eq!(response.nonce, 1);
     }
@@ -834,7 +1194,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_delta_proposal_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -851,16 +1211,19 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, _response) =
-            get_delta_proposal(State(state), AuthHeader(credentials), Query(query)).await;
+        let err =
+            match get_delta_proposal(State(state), AuthHeader(credentials), Query(query)).await {
+                Ok(_) => panic!("get_delta_proposal should fail when proposal is missing"),
+                Err(err) => err,
+            };
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err.http_status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_get_delta_proposal_unauthorized() {
         let (state, _storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
 
         let _metadata = metadata.with_get(Ok(Some(create_account_metadata(
@@ -877,17 +1240,22 @@ mod tests {
         let (pubkey, _signature, timestamp) = credentials.as_signature().unwrap();
         let invalid_credentials =
             Credentials::signature(pubkey.to_string(), "0xdeadbeef".to_string(), timestamp);
-        let (status, Json(response)) =
-            get_delta_proposal(State(state), AuthHeader(invalid_credentials), Query(query)).await;
+        let err =
+            match get_delta_proposal(State(state), AuthHeader(invalid_credentials), Query(query))
+                .await
+            {
+                Ok(_) => panic!("get_delta_proposal should fail with invalid credentials"),
+                Err(err) => err,
+            };
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(response.account_id.contains("Authentication failed"));
+        assert_eq!(err.http_status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(err, GuardianError::AuthenticationFailed(_)));
     }
 
     #[tokio::test]
     async fn test_sign_delta_proposal_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -908,16 +1276,15 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &request);
-        let (status, _response) =
+        let result =
             sign_delta_proposal(State(state), AuthHeader(credentials), Json(request)).await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(result.is_err(), "sign on missing proposal should fail");
     }
 
     #[tokio::test]
     async fn test_push_delta_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -939,21 +1306,21 @@ mod tests {
 
         let test_delta_value = serde_json::to_value(&test_delta).unwrap();
         let credentials = signed_credentials(&signer, &account_id, &test_delta_value);
-        let (status, Json(response)) = push_delta(
+        let Json(response) = push_delta(
             State(state),
             AuthHeader(credentials),
             Json(test_delta_value),
         )
-        .await;
+        .await
+        .expect("push_delta should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.account_id, account_id);
     }
 
     #[tokio::test]
     async fn test_get_delta_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -971,10 +1338,10 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_delta(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) = get_delta(State(state), AuthHeader(credentials), Query(query))
+            .await
+            .expect("get_delta should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.account_id, account_id);
         assert_eq!(response.nonce, 1);
     }
@@ -982,7 +1349,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_delta_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -999,16 +1366,18 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, _response) =
-            get_delta(State(state), AuthHeader(credentials), Query(query)).await;
+        let err = match get_delta(State(state), AuthHeader(credentials), Query(query)).await {
+            Ok(_) => panic!("get_delta should fail when delta is missing"),
+            Err(err) => err,
+        };
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err.http_status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_get_state_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1030,17 +1399,17 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_state(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) = get_state(State(state), AuthHeader(credentials), Query(query))
+            .await
+            .expect("get_state should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.account_id, account_id);
     }
 
     #[tokio::test]
     async fn test_get_state_not_found() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1056,16 +1425,18 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, _response) =
-            get_state(State(state), AuthHeader(credentials), Query(query)).await;
+        let err = match get_state(State(state), AuthHeader(credentials), Query(query)).await {
+            Ok(_) => panic!("get_state should fail when state is missing"),
+            Err(err) => err,
+        };
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err.http_status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_get_delta_since_success() {
         let (state, storage, _network, metadata) = create_test_state();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170".to_string();
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string();
         let signer = TestSigner::new();
         let commitment = signer.commitment_hex.clone();
 
@@ -1086,10 +1457,10 @@ mod tests {
         };
 
         let credentials = signed_credentials(&signer, &account_id, &query);
-        let (status, Json(response)) =
-            get_delta_since(State(state), AuthHeader(credentials), Query(query)).await;
+        let Json(response) = get_delta_since(State(state), AuthHeader(credentials), Query(query))
+            .await
+            .expect("get_delta_since should succeed");
 
-        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.account_id, account_id);
     }
 }

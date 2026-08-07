@@ -5,10 +5,14 @@ use tonic::{
     Request,
 };
 
-pub use miden_node_proto::generated::{
-    account, block_producer, blockchain, note, primitives, rpc, store, transaction,
-};
+pub use miden_node_proto::generated::{account, blockchain, note, primitives, rpc, transaction};
 pub use rpc::api_client::ApiClient;
+
+/// Per-request deadline applied to the channel. Without one, a hung
+/// node holds a caller (and everything awaiting it) indefinitely —
+/// concurrent callers share the multiplexed channel, so no request may
+/// be allowed to wait forever.
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Simple wrapper around the tonic-generated ApiClient
 pub struct MidenRpcClient {
@@ -21,6 +25,7 @@ impl MidenRpcClient {
 
         let channel = Channel::from_shared(endpoint_str.clone())
             .map_err(|e| format!("Invalid endpoint: {e}"))?
+            .timeout(RPC_TIMEOUT)
             .tls_config(ClientTlsConfig::new().with_native_roots())
             .map_err(|e| format!("TLS config error: {e}"))?
             .connect()
@@ -30,6 +35,20 @@ impl MidenRpcClient {
         let client = ApiClient::new(channel);
 
         Ok(Self { client })
+    }
+
+    /// Builds a client over a lazily-created channel that is never proactively
+    /// connected and skips TLS root loading. This lets pure, non-RPC call paths
+    /// be unit-tested without a network or a system certificate store; issuing
+    /// an actual RPC on the resulting client will fail to connect.
+    pub fn lazy_unconnected(endpoint: impl Into<String>) -> Result<Self, String> {
+        let channel = Channel::from_shared(endpoint.into())
+            .map_err(|e| format!("Invalid endpoint: {e}"))?
+            .connect_lazy();
+
+        Ok(Self {
+            client: ApiClient::new(channel),
+        })
     }
 
     /// Get the underlying tonic ApiClient for full access to all RPC methods:
@@ -76,9 +95,9 @@ impl MidenRpcClient {
         };
 
         self.client
-            .submit_proven_transaction(Request::new(request))
+            .submit_proven_tx(Request::new(request))
             .await
-            .map_err(|e| format!("SubmitProvenTransaction RPC failed: {e}"))?;
+            .map_err(|e| format!("SubmitProvenTx RPC failed: {e}"))?;
 
         Ok(())
     }
@@ -99,7 +118,7 @@ impl MidenRpcClient {
         let request = rpc::SyncNotesRequest {
             block_range: Some(rpc::BlockRange {
                 block_from: block_num,
-                block_to: None,
+                block_to: u32::MAX,
             }),
             note_tags,
         };
@@ -109,22 +128,6 @@ impl MidenRpcClient {
             .sync_notes(Request::new(request))
             .await
             .map_err(|e| format!("SyncNotes RPC failed: {e}"))?;
-
-        Ok(response.into_inner())
-    }
-
-    /// Check nullifiers and get their proofs
-    pub async fn check_nullifiers(
-        &mut self,
-        nullifiers: Vec<primitives::Digest>,
-    ) -> Result<rpc::CheckNullifiersResponse, String> {
-        let request = rpc::NullifierList { nullifiers };
-
-        let response = self
-            .client
-            .check_nullifiers(Request::new(request))
-            .await
-            .map_err(|e| format!("CheckNullifiers RPC failed: {e}"))?;
 
         Ok(response.into_inner())
     }
@@ -149,11 +152,11 @@ impl MidenRpcClient {
         Ok(response.into_inner())
     }
 
-    /// Fetch account commitment from the Miden network
-    pub async fn get_account_commitment(
-        &mut self,
-        account_id: &AccountId,
-    ) -> Result<String, String> {
+    /// Fetch account commitment from the Miden network. Takes `&self`:
+    /// the tonic client is cloned per call (a cheap handle onto the
+    /// same multiplexed HTTP/2 channel), so concurrent callers never
+    /// serialize on this client.
+    pub async fn get_account_commitment(&self, account_id: &AccountId) -> Result<String, String> {
         let account_id_bytes = account_id.to_bytes();
 
         let request = Request::new(rpc::AccountRequest {
@@ -166,6 +169,7 @@ impl MidenRpcClient {
 
         let response = self
             .client
+            .clone()
             .get_account(request)
             .await
             .map_err(|e| format!("RPC call failed: {e}"))?;

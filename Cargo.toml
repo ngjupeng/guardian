@@ -24,7 +24,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.14.4"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.93"
 authors = ["OpenZeppelin"]
@@ -60,12 +60,15 @@ assert_matches = "1.5"
 rstest = "0.26"
 futures = "0.3"
 chrono = "0.4"
+# OpenAPI spec generation (issue #241). `axum_extras` enables richer
+# parameter inference for axum `Query`/`Path` extractors.
+utoipa = { version = "5", features = ["axum_extras"] }
 
 # Miden
-miden-protocol = "0.14.3"
-miden-standards = "0.14.3"
-miden-tx = "0.14.3"
-miden-node-proto = "0.14.7"
-miden-testing = "0.14.3"
-miden-client = "0.14.3"
-miden-client-sqlite-store = "0.14.3"
+miden-protocol = "0.15.3"
+miden-standards = "0.15.3"
+miden-tx = "0.15.3"
+miden-node-proto ="0.15.0"
+miden-testing = "0.15.3"
+miden-client = "0.15.0"
+miden-client-sqlite-store = "0.15.0"

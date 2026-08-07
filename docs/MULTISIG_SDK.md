@@ -2,6 +2,11 @@
 
 An SDK for creating and managing multisignature accounts on the Miden network. Available for both **TypeScript** (web/browser) and **Rust** (native/server) environments.
 
+> New to Guardian? Read [`docs/CONCEPTS.md`](./CONCEPTS.md) for the trust
+> model and state/delta lifecycle, and
+> [`docs/architecture/services.md`](./architecture/services.md) for the
+> server-side surface this SDK targets.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
@@ -10,8 +15,6 @@ An SDK for creating and managing multisignature accounts on the Miden network. A
 - [Rust SDK Guide](#rust-sdk-guide)
 - [Use Cases](#use-cases)
 - [Offline Workflow](#offline-workflow)
-- [Error Handling](#error-handling)
-- [Security Best Practices](#security-best-practices)
 - [Releasing](#releasing)
 
 ---
@@ -30,8 +33,8 @@ npm install @openzeppelin/miden-multisig-client @miden-sdk/miden-sdk
 **Rust (Cargo.toml)**
 ```toml
 [dependencies]
-miden-multisig-client = "0.14.4"
-miden-client = "0.14.3"
+miden-multisig-client = "0.15.1"
+miden-client = "0.15.0"
 ```
 
 ### 5-Minute Example
@@ -52,6 +55,8 @@ const client = new MultisigClient(midenClient, {
   guardianEndpoint: 'http://localhost:3000',
   midenRpcEndpoint: 'https://rpc.devnet.miden.io',
 });
+// Both endpoints are required; construction throws when either is omitted.
+// midenRpcEndpoint must point at the same network as the injected MidenClient.
 
 // 2. Get GUARDIAN server public key
 const guardianCommitment = await client.guardianClient.getPubkey();
@@ -85,6 +90,52 @@ await multisig.executeProposal(proposal.id);
 
 console.log('Transfer executed!');
 ```
+
+### Prover endpoint and retry policy
+
+Both multisig SDKs retry only remote transaction proving. The default is two
+total proof attempts. In TypeScript, endpoint-less injected provers, including
+local and callback provers, run once. A custom remote URL overrides the Miden
+client's injected prover.
+
+```typescript
+const client = new MultisigClient(midenClient, {
+  guardianEndpoint: 'http://localhost:3000',
+  midenRpcEndpoint: 'https://rpc.devnet.miden.io',
+  prover: {
+    url: 'https://prover.example',
+    retry: { maxAttempts: 4 },
+  },
+});
+```
+
+```rust
+use miden_multisig_client::{ProverConfig, ProverRetryPolicy};
+
+let prover = ProverConfig::new()
+    .with_url("https://prover.example")?
+    .with_retry_policy(ProverRetryPolicy::new(4));
+
+let client = MultisigClient::builder()
+    .miden_endpoint(Endpoint::devnet())
+    .guardian_endpoint("http://localhost:50051")
+    .account_dir("/tmp/multisig-client")
+    .prover_config(prover)
+    .generate_key()
+    .build()
+    .await?;
+```
+
+URLs are validated during construction and must be absolute HTTP(S) URLs. A
+custom prover never falls back to a default endpoint. Retries cover transient
+proving conditions such as cancellation, deadlines, temporary unavailability,
+capacity exhaustion, HTTP 408/429/502/503/504, I/O timeout, connection reset,
+and broken pipe. Permanent or unrecognized failures return immediately.
+
+Only proving is retried: transaction execution, GUARDIAN coordination, Miden
+submission, and local application each run once. A larger attempt budget can
+recover from brief failures but does not add prover capacity. This policy does
+not alter or retry Miden RPC requests.
 
 #### Rust
 
@@ -170,6 +221,72 @@ GUARDIAN is a coordination server that:
 - **Pending**: Proposal created, collecting signatures (shows X/Y signed)
 - **Ready**: Threshold met, can be executed
 - **Finalized**: Executed on-chain or discarded
+
+### Custom Proposal Types
+
+Guardian accepts any non-empty `proposal_type`, not just the first-party
+operations (issue #266). A proposal whose type the SDK does not model is
+exposed as the **custom** bucket — `TransactionType::Custom` in Rust,
+`proposalType: 'custom'` in TypeScript — while the label is preserved
+(Rust `ProposalMetadata.proposal_type`, TypeScript `CustomProposalMetadata.rawProposalType`)
+so it can be displayed. The SDK normalizes the label to lowercase `snake_case`
+(trim + lowercase, then require `[a-z0-9_]+` — the same shape as built-in
+labels), so `b2agg` is accepted, `B2Agg` is lowercased to `b2agg`, and
+`add signer` / `add-signer` are rejected. (Normalization is SDK-side; the server
+itself still accepts any non-empty string.)
+
+Custom proposals can be listed, displayed, signed, and exported/imported.
+
+**Producer API (issue #266).** The integration that owns a custom type builds
+its own transaction and drives the create + execute ends; the SDK never
+executes a transaction it does not understand. The model is **symmetric across
+Rust and TypeScript**:
+
+- **Create** — `propose_custom_transaction(transaction_request_bytes, proposal_type)` (Rust) /
+  `createCustomProposal(transactionRequestBytes, proposalType)` (TS). The bytes are a
+  serialized transaction request; the SDK derives the summary and pushes the
+  proposal with the custom label. They are **not** stored on the server.
+  Cosigners then review and sign through the normal flow.
+- **Execute** — `prepare_custom_execution(proposal_id, transaction_request_bytes)` (Rust) /
+  `prepareCustomExecution(proposalId, transactionRequestBytes)` (TS). The SDK verifies the
+  proposal is ready, binding-checks the request against the signed commitment
+  (before any acknowledgment request), fetches the GUARDIAN ack, and returns the
+  **advice** (cosigner signatures + ack). The integration injects that advice
+  into its own transaction and submits via its own client:
+
+  ```ts
+  // TypeScript: rebuild via the integration's builder (the wasm request is immutable)
+  const advice = await multisig.prepareCustomExecution(proposalId, transactionRequestBytes);
+  const finalReq = myBuilder.extendAdviceMap(advice).build();
+  await multisig.submitTransaction(finalReq);
+  ```
+  ```rust
+  // Rust: inject into the request's advice map, submit via the SDK helper
+  let advice = client.prepare_custom_execution(&proposal_id, &transaction_request_bytes).await?;
+  let mut req = deserialize_transaction_request(&transaction_request_bytes)?;
+  req.advice_map_mut().extend(advice);
+  client.submit_transaction(req).await?;
+  ```
+
+The SDK owns the security-critical pieces (binding check, signature + ack
+assembly, ack-after-binding ordering); the integration owns only the
+transaction recipe + submit. `execute_proposal` on a custom type returns a
+clear error pointing to `prepare_custom_execution`. Because the integration must
+rebuild its transaction to execute, **custom execution is performed by a party
+that holds the recipe** (typically the producer), not by an arbitrary cosigner.
+
+The returned advice is keyed by the signer and GUARDIAN commitments
+(domain-separated digests over the signed `tx_summary`), the same keys the
+SDK's own built-in execution uses. Extending a transaction's advice map with it
+therefore does not collide with the transaction's ordinary inputs; the
+integration extends rather than replaces its advice map.
+
+> **Security:** for first-party types the SDK reconstructs the transaction from
+> metadata and checks it against the signed `tx_summary` commitment. For custom
+> types there is no such reconstruction, so the SDK cannot verify that display
+> metadata (e.g. `description`) matches what the transaction actually does.
+> Cosigners must verify the raw `tx_summary` they are signing — not trust the
+> label or description.
 
 ### Offline Workflow
 
@@ -268,6 +385,36 @@ console.log('Signers:', detected.signerCommitments);
 console.log('Vault balances:', detected.vaultBalances);
 ```
 
+### Recovering Accounts By Key
+
+Use `recoverByKey` when a wallet has a signing key from an account's
+authorization set but does not know the account ID yet. The helper queries
+Guardian's `/state/lookup` endpoint with proof-of-possession of the key,
+fetches state for each matching account, and returns `(accountId, state)`
+pairs.
+
+```typescript
+const recovered = await client.recoverByKey(signer);
+
+if (recovered.length === 0) {
+  console.log('No account on this Guardian authorizes this key');
+}
+
+for (const { accountId, state } of recovered) {
+  console.log('Recovered account:', accountId);
+  console.log('State commitment:', state.commitment);
+
+  const multisig = await client.load(accountId, signer);
+  // Continue with normal proposal or sync flows.
+}
+```
+
+The signer passed to `recoverByKey` must implement `signLookupMessage`. The
+bundled `FalconSigner`, `EcdsaSigner`, Miden Wallet signer, and Para signer
+support it. Multiple matches are valid: the same key commitment may authorize
+more than one account, and the method returns all matches instead of choosing
+one implicitly.
+
 ### Proposal Operations
 
 #### P2ID Transfer (Send Funds)
@@ -278,7 +425,51 @@ const proposal = await multisig.createP2idProposal(
   faucetAccountId,       // Faucet (token) ID
   1000n                  // Amount to send
 );
+
+// Private note: only the note's hash is published on chain. Pass `noteType`
+// in the options object (`NoteType` comes from `@miden-sdk/miden-sdk`).
+import { NoteType } from '@miden-sdk/miden-sdk';
+
+const privateProposal = await multisig.createP2idProposal(
+  recipientAccountId,
+  faucetAccountId,
+  1000n,
+  undefined,                       // nonce (defaults to Date.now())
+  { noteType: NoteType.Private },  // note visibility; defaults to NoteType.Public
+);
 ```
+
+> **Warning:** a `private` P2ID note publishes only its hash on chain. The
+> recipient cannot discover the note by syncing; the full note details must
+> be shared with them out-of-band before they can consume it. Use
+> `exportNoteToBytes` / `importNoteFromBytes` (or the browser file variants
+> `exportNoteToFile` / `importNoteFromFile`) for that transfer (issue #356):
+
+```typescript
+// Sender: resolve the note ID BEFORE executing (it derives from the
+// pre-execution vault state), then export after execution.
+const noteId = await multisig.getP2idNoteId(privateProposal);
+// ...sign + execute the proposal...
+const noteFileBytes = await multisig.exportNoteToBytes(noteId);
+// Deliver `noteFileBytes` to the recipient out-of-band (file, message, ...).
+// Or, in a browser, trigger a download of the note file directly:
+await multisig.exportNoteToFile(noteId);
+
+// Recipient: import the bytes (or a File from an <input type="file">), then
+// sync so the note's on-chain commitment is tracked; it then appears in
+// getConsumableNotes() and can be consumed with createConsumeNotesProposal
+// as usual.
+const importedNoteId = await multisig.importNoteFromBytes(noteFileBytes);
+```
+
+> **Note:** every cosigner device that verifies or signs the consume-notes
+> proposal needs the note in its local store with the on-chain inclusion
+> proof — deliver the note file to each of them (import + sync), not just to
+> the proposer. A cosigner whose store lacks the authenticated note rebuilds
+> the transaction differently (the input-notes commitment distinguishes
+> authenticated from unauthenticated consumption) and rejects the proposal
+> with `metadata does not match tx_summary`. The sender's own device heals
+> itself: it already knows the full note, so a post-commit sync is enough.
 
 #### Consume Notes (Claim Received Funds)
 
@@ -290,6 +481,11 @@ const notes = await multisig.getConsumableNotes();
 const noteIds = notes.map(n => n.id);
 const proposal = await multisig.createConsumeNotesProposal(noteIds);
 ```
+
+A private note received out-of-band must first be loaded with
+`importNoteFromBytes(noteFileBytes)` or `importNoteFromFile(file)` (see the
+P2ID section above); after a sync it shows up in `getConsumableNotes()` like
+any public note.
 
 #### Add Signer
 
@@ -375,6 +571,7 @@ await multisig.executeProposal(signedProposal.id);
 |--------|-------------|
 | `create(config, signer)` | Create new multisig account |
 | `load(accountId, signer)` | Load existing account from GUARDIAN |
+| `recoverByKey(signer)` | Discover accounts that authorize the signer's key and fetch each current state |
 | `guardianClient` | Access to underlying GUARDIAN HTTP client |
 
 #### Multisig
@@ -387,9 +584,16 @@ await multisig.executeProposal(signedProposal.id);
 | `fetchState()` | Fetch latest state from GUARDIAN |
 | `registerOnGuardian()` | Register new account with GUARDIAN |
 | `syncProposals()` | Sync proposals from GUARDIAN |
+| `abandonCandidate(nonce)` | Record an abandon intent for a stuck candidate (worker resolves after a short quarantine) |
+| `abandonStatus(nonce)` | Poll the abandon resolution: `waiting` / `landed` / `abandoned` / `unexpected` |
 | `listProposals()` | Get cached proposals |
-| `createP2idProposal(recipient, faucet, amount, nonce?)` | Create transfer proposal |
+| `createP2idProposal(recipient, faucet, amount, nonce?, { noteType }?)` | Create transfer proposal (`noteType`: `NoteType.Public` (default) or `NoteType.Private`) |
 | `createConsumeNotesProposal(noteIds, nonce?)` | Create note consumption proposal |
+| `getP2idNoteId(proposal)` | Compute the note ID a P2ID proposal creates (call before executing) |
+| `exportNoteToBytes(noteId)` | Export a created note as note-file bytes for out-of-band delivery |
+| `exportNoteToFile(noteId, filename?)` | Browser-only: download the note file |
+| `importNoteFromBytes(noteBytes)` | Import a note file received out-of-band |
+| `importNoteFromFile(file)` | Import a note file from a browser `File`/`Blob` |
 | `createAddSignerProposal(commitment, nonce?, threshold?)` | Create add signer proposal |
 | `createRemoveSignerProposal(commitment, nonce?, threshold?)` | Create remove signer proposal |
 | `createChangeThresholdProposal(threshold, nonce?)` | Create threshold change proposal |
@@ -409,6 +613,7 @@ await multisig.executeProposal(signedProposal.id);
 | `publicKey` | Serialized public key (hex) |
 | `signRequest(id, timestamp, requestPayload)` | Sign account ID + timestamp + request payload digest for auth |
 | `signCommitment(hex)` | Sign commitment/word |
+| `signLookupMessage(timestamp, keyCommitment)` | Sign account-less lookup digest for `recoverByKey` |
 
 #### AccountInspector
 
@@ -486,11 +691,47 @@ println!("Nonce: {}", account.nonce());
 println!("GUARDIAN enabled: {}", account.guardian_enabled()?);
 ```
 
+### Recovering Accounts By Key
+
+Use `recover_by_key` when the configured signer is known but the account ID is
+not. The client signs a lookup-bound authentication message, asks Guardian for
+accounts that authorize the signer's commitment, fetches state for each match,
+and returns `RecoveredAccount` values.
+
+```rust
+let recovered = client.recover_by_key().await?;
+
+if recovered.is_empty() {
+    println!("No account on this Guardian authorizes this key");
+}
+
+for entry in recovered {
+    println!("Recovered account: {}", entry.account_id);
+    println!("State commitment: {}", entry.state.commitment);
+
+    let account_id = AccountId::from_hex(&entry.account_id)?;
+    client.pull_account(account_id).await?;
+    // Continue with normal proposal or sync flows.
+}
+```
+
+An empty list means the key is valid but this Guardian has no account metadata
+that authorizes its commitment. Authentication failures, malformed lookup
+responses, and per-account `get_state` failures are returned as errors.
+
 ### Transaction Types
 
 ```rust
-// P2ID Transfer
+// P2ID Transfer (public note)
 let tx = TransactionType::transfer(recipient_id, faucet_id, 1000);
+
+// P2ID Transfer with a private note (only the note hash is published on
+// chain; the recipient needs the note shared out-of-band — see
+// "Out-of-Band Note Transfer" below). `NoteType` is re-exported from
+// `miden_protocol::note`.
+let tx = TransactionType::transfer_with_note_type(
+    recipient_id, faucet_id, 1000, NoteType::Private,
+);
 
 // Consume Notes
 let tx = TransactionType::consume_notes(vec![note_id1, note_id2]);
@@ -597,6 +838,39 @@ for note in notes {
 }
 ```
 
+### Out-of-Band Note Transfer (Private Notes)
+
+A private P2ID note publishes only its commitment on chain, so the recipient's
+client can never learn the note contents via sync. The sender must export the
+note and deliver the file out-of-band (issue #356):
+
+```rust
+// Sender: resolve the note ID BEFORE executing (it derives from the
+// pre-execution vault state), then export after execution.
+let note_id = client.p2id_note_id(&proposal)?;
+client.execute_proposal(&proposal.id).await?;
+client.export_note_to_file(&note_id.to_hex(), Path::new("note.mno")).await?;
+// Deliver note.mno to the recipient out-of-band (file, message, ...).
+
+// Recipient: import the file, then sync so the note's on-chain commitment
+// is tracked; it then appears in list_consumable_notes() and can be
+// consumed with a regular consume-notes proposal.
+let imported_note_id = client.import_note_from_file(Path::new("note.mno")).await?;
+client.sync().await?;
+```
+
+`export_note_to_bytes` / `import_note_from_bytes` are the in-memory variants
+for programmatic delivery.
+
+Every cosigner device that verifies or signs the consume-notes proposal needs
+the note in its local store with the on-chain inclusion proof — deliver the
+note file to each of them (import + sync), not just to the proposer. A
+cosigner whose store lacks the authenticated note rebuilds the transaction
+differently (the input-notes commitment distinguishes authenticated from
+unauthenticated consumption) and rejects the proposal with `metadata does not
+match tx_summary`. The sender's own device heals itself: it already knows the
+full note, so a post-commit sync is enough.
+
 ### API Reference
 
 #### MultisigClient
@@ -612,11 +886,14 @@ for note in notes {
 | `account_id()` | Get account ID (Option) |
 | `user_commitment()` | Get user's key commitment |
 | `user_commitment_hex()` | Get commitment as hex |
+| `recover_by_key()` | Discover accounts that authorize the configured signer and fetch each current state |
 | `propose_transaction(tx)` | Create and submit proposal |
 | `propose_with_fallback(tx)` | Online or offline proposal |
 | `list_proposals()` | List pending proposals |
 | `sign_proposal(id)` | Sign a proposal |
 | `execute_proposal(id)` | Execute ready proposal |
+| `abandon_candidate(nonce)` | Record an abandon intent for a stuck candidate (worker resolves after a short quarantine) |
+| `abandon_status(nonce)` | Poll the abandon resolution: `Waiting` / `Landed` / `Abandoned` / `Unexpected` |
 | `create_proposal_offline(tx)` | Create offline proposal |
 | `sign_imported_proposal(exported)` | Sign offline proposal |
 | `execute_imported_proposal(exported)` | Execute offline proposal |
@@ -624,6 +901,11 @@ for note in notes {
 | `import_proposal(path)` | Import from file |
 | `list_consumable_notes()` | List available notes |
 | `list_consumable_notes_filtered(filter)` | Filter notes |
+| `p2id_note_id(proposal)` | Compute the note ID a P2ID proposal creates (call before executing) |
+| `export_note_to_file(note_id, path)` | Export a created note to a file for out-of-band delivery |
+| `export_note_to_bytes(note_id)` | Export a created note as note-file bytes |
+| `import_note_from_file(path)` | Import a note file received out-of-band |
+| `import_note_from_bytes(bytes)` | Import a note from note-file bytes |
 
 #### MultisigAccount
 
@@ -644,7 +926,7 @@ for note in notes {
 
 | Variant | Description |
 |---------|-------------|
-| `P2ID { recipient, faucet_id, amount }` | Transfer funds |
+| `P2ID { recipient, faucet_id, amount, note_type }` | Transfer funds (`note_type` selects note visibility; defaults to `NoteType::Public` via `transfer()`) |
 | `ConsumeNotes { note_ids }` | Consume notes |
 | `AddCosigner { new_commitment }` | Add signer |
 | `RemoveCosigner { commitment }` | Remove signer |
@@ -717,7 +999,7 @@ let proposal = client.propose_transaction(tx).await?;
 client.execute_proposal(&proposal.id).await?;
 ```
 
-### Use Case 4: Note Consumption
+### Use Case 3: Note Consumption
 
 Claiming tokens sent to the multisig.
 
@@ -814,13 +1096,14 @@ console.log('Notes consumed, funds now in vault');
 
 | SDK Version | miden-client | miden-sdk (npm) | Notes |
 |-------------|--------------|-----------------|-------|
+| 0.15.x | 0.15.0 | ^0.15.0 | Miden 0.15 protocol; v1 account IDs, bech32m addresses |
 | 0.14.x | 0.14.x | ^0.14.0 | Devnet default, MidenClient public API |
 | 0.13.x | 0.13.0 | ^0.13.0 | ECDSA support, wallet signers |
 | 0.12.x | 0.12.5 | ^0.12.5 | Initial release |
 
 ### Breaking Changes
 
-Check the [CHANGELOG](../CHANGELOG.md) for breaking changes between versions.
+Check the [GitHub release notes](https://github.com/OpenZeppelin/guardian/releases) for breaking changes between versions.
 
 ---
 
@@ -839,6 +1122,7 @@ cargo test -p guardian-server --lib
 
 # TypeScript
 cd packages/guardian-client && npm test
+cd packages/guardian-evm-client && npm test
 cd packages/miden-multisig-client && npm test
 ```
 
@@ -846,6 +1130,7 @@ cd packages/miden-multisig-client && npm test
 
 ```bash
 cd packages/guardian-client && npm run build
+cd packages/guardian-evm-client && npm run build
 cd packages/miden-multisig-client && npm run build
 ```
 
@@ -862,6 +1147,7 @@ Update the version in these files:
 | `crates/client/Cargo.toml` | `guardian-shared` dep version | - |
 | `crates/miden-multisig-client/Cargo.toml` | `guardian-client`, `guardian-shared`, `miden-confidential-contracts` dep versions | - |
 | `packages/guardian-client/package.json` | `version` | - |
+| `packages/guardian-evm-client/package.json` | `version` | - |
 | `packages/miden-multisig-client/package.json` | `version` + `@openzeppelin/guardian-client` dep version | - |
 
 The `server`, `miden-rpc-client`, `miden-keystore`, and example crates have their own independent versions and are not published.
@@ -889,12 +1175,14 @@ Wait for each step to finish before proceeding to the next (crates.io index need
 Publish in dependency order:
 
 ```bash
-# 1. Build both packages
+# 1. Build TypeScript packages
 cd packages/guardian-client && npm run build
+cd packages/guardian-evm-client && npm run build
 cd packages/miden-multisig-client && npm run build
 
-# 2. Publish guardian-client first (no internal deps)
+# 2. Publish base clients first (no internal deps)
 cd packages/guardian-client && npm publish --access public
+cd packages/guardian-evm-client && npm publish --access public
 
 # 3. Publish miden-multisig-client (depends on guardian-client)
 cd packages/miden-multisig-client && npm publish --access public
@@ -905,8 +1193,8 @@ cd packages/miden-multisig-client && npm publish --access public
 1. Tag the release:
 
 ```bash
-git tag v0.14.0
-git push origin v0.14.0
+git tag v0.15.1
+git push origin v0.15.1
 ```
 
 2. Create a GitHub release from the tag with release notes.

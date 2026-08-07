@@ -7,11 +7,17 @@
 
 import { type MidenClient, Account, AccountId } from '@miden-sdk/miden-sdk';
 import { GuardianHttpClient } from '@openzeppelin/guardian-client';
+import type { StateObject } from '@openzeppelin/guardian-client';
 import { Multisig } from './multisig.js';
 import { createMultisigAccount } from './account/index.js';
 import { AccountInspector } from './inspector.js';
-import { getRawMidenClient, resolveMidenRpcEndpoint } from './raw-client.js';
+import { getRawMidenClient, requireConfigValue, requireMidenRpcEndpoint } from './raw-client.js';
 import type { MultisigConfig, Signer } from './types.js';
+import {
+  resolveProverConfig,
+  type ProverConfig,
+  type ResolvedProverConfig,
+} from './prover/config.js';
 
 interface AccountKeyBindingSigner {
   bindAccountKey?(midenClient: MidenClient, accountId: string): Promise<void>;
@@ -32,10 +38,26 @@ async function bindSignerAccountKey(
  * Configuration for MultisigClient.
  */
 export interface MultisigClientConfig {
-  /** GUARDIAN server endpoint */
-  guardianEndpoint?: string;
-  /** Miden node RPC endpoint used for state commitment verification */
-  midenRpcEndpoint?: string;
+  /** GUARDIAN server endpoint. Required — there is no default. */
+  guardianEndpoint: string;
+  /**
+   * Miden node RPC endpoint used for proposal execution and state
+   * commitment verification. Required — must point at the same network as
+   * the injected `MidenClient`; there is no default.
+   */
+  midenRpcEndpoint: string;
+  /** Multisig-owned remote prover override and proof retry policy. */
+  prover?: ProverConfig;
+}
+
+/**
+ * One match returned by `MultisigClient.recoverByKey`. Pairs the discovered
+ * `accountId` with the current `state` snapshot so callers do not need to do a
+ * second round-trip per account.
+ */
+export interface RecoveredAccount {
+  accountId: string;
+  state: StateObject;
 }
 
 /**
@@ -55,6 +77,10 @@ export interface MultisigClientConfig {
  * const client = new MultisigClient(midenClient, {
  *   guardianEndpoint: 'http://localhost:3000',
  *   midenRpcEndpoint: 'https://rpc.devnet.miden.io',
+ *   prover: {
+ *     url: 'https://prover.example',
+ *     retry: { maxAttempts: 4 },
+ *   },
  * });
  *
  * // Get GUARDIAN pubkey for config
@@ -68,21 +94,27 @@ export interface MultisigClientConfig {
 export class MultisigClient {
   private readonly midenClient: MidenClient;
   private readonly midenRpcEndpoint: string;
+  private readonly proverConfig: ResolvedProverConfig;
   private _guardianClient: GuardianHttpClient;
 
-  constructor(midenClient: MidenClient, config: MultisigClientConfig = {}) {
+  constructor(midenClient: MidenClient, config: MultisigClientConfig) {
     this.midenClient = midenClient;
-    this.midenRpcEndpoint = resolveMidenRpcEndpoint(config.midenRpcEndpoint);
-    this._guardianClient = new GuardianHttpClient(config.guardianEndpoint ?? 'http://localhost:3000');
+    this.midenRpcEndpoint = requireMidenRpcEndpoint(config?.midenRpcEndpoint);
+    this.proverConfig = resolveProverConfig(config?.prover, midenClient.defaultProver);
+    this._guardianClient = new GuardianHttpClient(
+      requireConfigValue('guardianEndpoint', config?.guardianEndpoint),
+    );
   }
 
   /**
    * Change the GUARDIAN endpoint.
-   * 
+   *
    * @param endpoint - The new GUARDIAN server endpoint URL
    */
   setGuardianEndpoint(endpoint: string): void {
-    this._guardianClient = new GuardianHttpClient(endpoint);
+    this._guardianClient = new GuardianHttpClient(
+      requireConfigValue('guardianEndpoint', endpoint),
+    );
   }
 
   /**
@@ -90,6 +122,31 @@ export class MultisigClient {
    */
   get guardianClient(): GuardianHttpClient {
     return this._guardianClient;
+  }
+
+  /**
+   * Recover the set of accounts a given signer authorizes by querying
+   * Guardian's `/state/lookup` endpoint and fetching state for each match.
+   * Returns `(accountId, state)` pairs; an empty array means no account on
+   * this operator authorizes the commitment (distinct from "wrong key",
+   * which would fail authentication first).
+   *
+   * @throws if `signer` does not implement `signLookupMessage`. The bundled
+   *   `FalconSigner` and `EcdsaSigner` both do.
+   */
+  async recoverByKey(signer: Signer): Promise<RecoveredAccount[]> {
+    this._guardianClient.setSigner(signer);
+
+    const lookup = await this._guardianClient.lookupAccountByKeyCommitment(signer.commitment);
+
+    // Per-account replay protection is scoped to each account's
+    // last_auth_timestamp, so concurrent getState calls do not race.
+    return Promise.all(
+      lookup.accounts.map(async ({ accountId }) => ({
+        accountId,
+        state: await this._guardianClient.getState(accountId),
+      })),
+    );
   }
 
   /**
@@ -117,7 +174,8 @@ export class MultisigClient {
       signer,
       this.midenClient,
       undefined,
-      this.midenRpcEndpoint
+      this.midenRpcEndpoint,
+      this.proverConfig,
     );
   }
 
@@ -169,7 +227,8 @@ export class MultisigClient {
       signer,
       this.midenClient,
       accountId,
-      this.midenRpcEndpoint
+      this.midenRpcEndpoint,
+      this.proverConfig,
     );
   }
 }

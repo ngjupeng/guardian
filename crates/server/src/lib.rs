@@ -2,7 +2,12 @@ pub use guardian_shared::{FromJson, ToJson};
 
 pub mod ack;
 pub mod api;
+pub mod audit;
+pub mod build_info;
 pub mod builder;
+pub mod config;
+pub mod coordination;
+pub mod dashboard;
 pub mod middleware;
 
 #[cfg(feature = "postgres")]
@@ -12,10 +17,16 @@ pub use builder::clock;
 pub use builder::logging;
 pub use builder::state;
 pub mod delta_object;
+pub mod delta_summary;
 pub mod error;
+#[cfg(feature = "evm")]
+pub mod evm;
 pub mod jobs;
 pub mod metadata;
+pub mod metrics;
 pub mod network;
+pub mod openapi;
+pub(crate) mod secret;
 pub mod services;
 pub mod state_object;
 pub mod storage;

@@ -1,13 +1,38 @@
-use axum::{Router, extract::DefaultBodyLimit, routing::get, routing::post, routing::put};
+use axum::{
+    Router, extract::DefaultBodyLimit, middleware::from_fn_with_state, routing::get, routing::post,
+    routing::put,
+};
 use tonic::transport::Server;
 use tower_http::cors::CorsLayer;
 
+use crate::api::dashboard::{
+    challenge_operator_login, get_dashboard_info_handler, get_dashboard_session_handler,
+    get_operator_account, get_operator_account_snapshot, list_operator_accounts, logout_operator,
+    pause_account_handler, unpause_account_handler, verify_operator_login,
+};
+use crate::api::dashboard_feeds::{
+    list_account_delta_detail_handler, list_account_deltas_handler, list_account_proposals_handler,
+    list_global_deltas_handler, list_global_proposals_handler,
+};
+#[cfg(feature = "evm")]
+use crate::api::evm::{
+    approve_evm_proposal, cancel_evm_proposal, challenge_evm_session, create_evm_proposal,
+    get_evm_proposal, get_executable_evm_proposal, list_evm_proposals, logout_evm_session,
+    register_evm_account, verify_evm_session,
+};
 use crate::api::grpc::GuardianService;
 use crate::api::grpc::guardian::FILE_DESCRIPTOR_SET;
 use crate::api::grpc::guardian::guardian_server::GuardianServer;
 use crate::api::http::{
-    configure, get_delta, get_delta_proposal, get_delta_proposals, get_delta_since, get_pubkey,
-    get_state, push_delta, push_delta_proposal, sign_delta_proposal,
+    abandon_candidate, configure, get_delta, get_delta_proposal, get_delta_proposals,
+    get_delta_since, get_pubkey, get_state, lookup, push_delta, push_delta_proposal,
+    sign_delta_proposal, status,
+};
+use crate::builder::startup::StartupInfo;
+use crate::dashboard::require_dashboard_session;
+use crate::metrics::{
+    MetricsConfig, MetricsGrpcLayer, describe_metrics, metrics_router, record_build_info,
+    start_refresher, track_http,
 };
 use crate::middleware::{BodyLimitConfig, RateLimitConfig, RateLimitLayer};
 use crate::services::start_canonicalization_worker;
@@ -18,9 +43,12 @@ use crate::state::AppState;
 /// Provides methods to run the server with the configured settings.
 pub struct ServerHandle {
     pub(crate) app_state: AppState,
+    pub(crate) leader: std::sync::Arc<dyn crate::coordination::LeaderElector>,
+    pub(crate) startup_info: StartupInfo,
     pub(crate) cors_layer: Option<CorsLayer>,
     pub(crate) rate_limit_config: Option<RateLimitConfig>,
     pub(crate) body_limit_config: Option<BodyLimitConfig>,
+    pub(crate) metrics_config: MetricsConfig,
     pub(crate) http_enabled: bool,
     pub(crate) http_port: u16,
     pub(crate) grpc_enabled: bool,
@@ -34,22 +62,81 @@ impl ServerHandle {
             "Hello, World!"
         }
 
+        // Issue #241: serve the auto-generated OpenAPI spec. Unauthenticated
+        // and read-only — it documents the contract, not data.
+        async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+            axum::Json(crate::openapi::openapi())
+        }
+
+        self.startup_info.log();
+
         let mut tasks = Vec::new();
 
+        // Set up the Prometheus integration before the listeners so
+        // requests are never served by an uninstrumented stack. The
+        // global recorder is process-wide and set-once. All wiring is
+        // gated on a successful install: on failure (a recorder is
+        // already installed — repeated run() in one process, e.g. e2e
+        // harnesses), the new recorder's handle would render an empty
+        // registry while instrumentation keeps writing to the
+        // pre-existing global one, so the refresher and listener are
+        // skipped rather than serving misleading data. Tests never
+        // install globally — they scope local recorders.
+        let mut metrics_enabled = self.metrics_config.enabled;
+        if metrics_enabled {
+            let recorder = crate::metrics::build_recorder();
+            let handle = recorder.handle();
+            match metrics::set_global_recorder(recorder) {
+                Ok(()) => {
+                    describe_metrics();
+                    record_build_info();
+
+                    start_refresher(
+                        &self.app_state,
+                        handle.clone(),
+                        self.metrics_config.refresh_interval,
+                    );
+
+                    let router = metrics_router(handle, &self.metrics_config);
+                    let bind_addr = self.metrics_config.bind_addr;
+                    let task = tokio::spawn(async move {
+                        let listener = tokio::net::TcpListener::bind(bind_addr)
+                            .await
+                            .expect("Failed to bind metrics listener");
+
+                        tracing::info!(
+                            address = %listener.local_addr().unwrap(),
+                            "Metrics listener listening"
+                        );
+
+                        axum::serve(listener, router)
+                            .await
+                            .expect("Metrics listener failed");
+                    });
+                    tasks.push(task);
+                }
+                Err(error) => {
+                    metrics_enabled = false;
+                    tracing::warn!(
+                        error = %error,
+                        "metrics recorder already installed; skipping metrics \
+                         listener and refresher for this run"
+                    );
+                }
+            }
+        }
+
         // Start background jobs based on canonicalization config
-        if let Some(config) = &self.app_state.canonicalization {
-            tracing::info!(
-                check_interval_seconds = config.check_interval_seconds,
-                max_retries = config.max_retries,
-                submission_grace_period_seconds = config.submission_grace_period_seconds,
-                "Starting canonicalization worker"
-            );
-            start_canonicalization_worker(self.app_state.clone());
+        if self.app_state.canonicalization.is_some() {
+            tracing::info!("Starting canonicalization worker");
+            start_canonicalization_worker(self.app_state.clone(), self.leader.clone());
         } else {
             tracing::info!(
                 "Running in optimistic mode - deltas accepted without on-chain verification"
             );
         }
+
+        start_session_sweep_worker(self.app_state.clone());
 
         // Start HTTP server if enabled
         if self.http_enabled {
@@ -60,8 +147,90 @@ impl ServerHandle {
             let body_limit_config = self.body_limit_config;
 
             let task = tokio::spawn(async move {
-                let mut app = Router::new()
+                // Feature 006-operator-authz FR-013: every existing dashboard
+                // read route requires `{dashboard:read}`. The authorization
+                // middleware is layered *inside* the session middleware so
+                // session validation always runs first (FR-012) — axum
+                // `route_layer`s compose outer-first, so the session layer
+                // is added last and the authz layer first.
+                use crate::dashboard::authz::{AuthzState, enforce as enforce_authz};
+                use crate::dashboard::permissions::Permission;
+                let dashboard_read_authz =
+                    AuthzState::new(state.clone(), &[Permission::DashboardRead]);
+
+                let dashboard_routes = Router::new()
+                    .route("/accounts", get(list_operator_accounts))
+                    .route("/accounts/{account_id}", get(get_operator_account))
+                    .route(
+                        "/accounts/{account_id}/snapshot",
+                        get(get_operator_account_snapshot),
+                    )
+                    .route(
+                        "/accounts/{account_id}/deltas",
+                        get(list_account_deltas_handler),
+                    )
+                    .route(
+                        "/accounts/{account_id}/deltas/{nonce}",
+                        get(list_account_delta_detail_handler),
+                    )
+                    .route(
+                        "/accounts/{account_id}/proposals",
+                        get(list_account_proposals_handler),
+                    )
+                    .route("/info", get(get_dashboard_info_handler))
+                    .route("/deltas", get(list_global_deltas_handler))
+                    .route("/proposals", get(list_global_proposals_handler))
+                    .route_layer(from_fn_with_state(dashboard_read_authz, enforce_authz))
+                    .route_layer(from_fn_with_state(state.clone(), require_dashboard_session));
+
+                // FR-034: /session sits outside the dashboard:read
+                // authz layer so `permissions: []` operators get 200,
+                // not 403.
+                let session_router = Router::new()
+                    .route("/session", get(get_dashboard_session_handler))
+                    .route_layer(from_fn_with_state(state.clone(), require_dashboard_session));
+                let dashboard_routes = dashboard_routes.merge(session_router);
+
+                // Per-account pause / unpause endpoints. Same per-route
+                // authz composition as the probe: declares the
+                // `accounts:pause` permission and reuses the session
+                // middleware.
+                let dashboard_routes = {
+                    let accounts_pause_authz =
+                        AuthzState::new(state.clone(), &[Permission::AccountsPause]);
+                    let pause_router = Router::new()
+                        .route("/accounts/{account_id}/pause", post(pause_account_handler))
+                        .route(
+                            "/accounts/{account_id}/unpause",
+                            post(unpause_account_handler),
+                        )
+                        .route_layer(from_fn_with_state(accounts_pause_authz, enforce_authz))
+                        .route_layer(from_fn_with_state(state.clone(), require_dashboard_session));
+                    dashboard_routes.merge(pause_router)
+                };
+
+                // Feature 006-operator-authz FR-027 / FR-028: the
+                // authz-test-probe Cargo feature gates a single test-only
+                // route that exercises the middleware end-to-end with
+                // a non-`dashboard:read` requirement. Default-off in
+                // release builds.
+                #[cfg(feature = "authz-test-probe")]
+                let dashboard_routes = {
+                    let accounts_pause_authz =
+                        AuthzState::new(state.clone(), &[Permission::AccountsPause]);
+                    let probe_router = Router::new()
+                        .route(
+                            crate::dashboard::probe::PROBE_PATH,
+                            post(crate::dashboard::probe::handle),
+                        )
+                        .route_layer(from_fn_with_state(accounts_pause_authz, enforce_authz))
+                        .route_layer(from_fn_with_state(state.clone(), require_dashboard_session));
+                    dashboard_routes.merge(probe_router)
+                };
+
+                let app = Router::new()
                     .route("/", get(root))
+                    .route("/api-docs/openapi.json", get(openapi_json))
                     .route("/delta", post(push_delta))
                     .route("/delta", get(get_delta))
                     .route("/delta/since", get(get_delta_since))
@@ -69,10 +238,41 @@ impl ServerHandle {
                     .route("/delta/proposal", get(get_delta_proposals))
                     .route("/delta/proposal/single", get(get_delta_proposal))
                     .route("/delta/proposal", put(sign_delta_proposal))
+                    .route("/delta/candidate/abandon", post(abandon_candidate))
                     .route("/configure", post(configure))
                     .route("/state", get(get_state))
+                    .route("/state/lookup", get(lookup))
                     .route("/pubkey", get(get_pubkey))
-                    .with_state(state);
+                    .route("/status", get(status))
+                    .route("/auth/challenge", get(challenge_operator_login))
+                    .route("/auth/verify", post(verify_operator_login))
+                    .route("/auth/logout", post(logout_operator));
+
+                #[cfg(feature = "evm")]
+                let app = app
+                    .route("/evm/auth/challenge", get(challenge_evm_session))
+                    .route("/evm/auth/verify", post(verify_evm_session))
+                    .route("/evm/auth/logout", post(logout_evm_session))
+                    .route("/evm/accounts", post(register_evm_account))
+                    .route(
+                        "/evm/proposals",
+                        post(create_evm_proposal).get(list_evm_proposals),
+                    )
+                    .route("/evm/proposals/{proposal_id}", get(get_evm_proposal))
+                    .route(
+                        "/evm/proposals/{proposal_id}/approve",
+                        post(approve_evm_proposal),
+                    )
+                    .route(
+                        "/evm/proposals/{proposal_id}/executable",
+                        get(get_executable_evm_proposal),
+                    )
+                    .route(
+                        "/evm/proposals/{proposal_id}/cancel",
+                        post(cancel_evm_proposal),
+                    );
+
+                let mut app = app.nest("/dashboard", dashboard_routes).with_state(state);
 
                 // Apply body size limit
                 let body_limit = body_limit_config.unwrap_or_else(BodyLimitConfig::from_env);
@@ -84,6 +284,14 @@ impl ServerHandle {
 
                 if let Some(cors) = cors_layer {
                     app = app.layer(cors);
+                }
+
+                // Outermost layer (added last) so rate-limit 429s and
+                // CORS short-circuits are observed too. Router-level
+                // layers run after routing, so MatchedPath is
+                // available for the bounded route label.
+                if metrics_enabled {
+                    app = app.layer(axum::middleware::from_fn(track_http));
                 }
 
                 let addr = format!("0.0.0.0:{port}");
@@ -128,12 +336,27 @@ impl ServerHandle {
 
                 tracing::info!(address = %addr, "gRPC server listening");
 
-                Server::builder()
-                    .add_service(GuardianServer::new(service))
-                    .add_service(reflection_service)
-                    .serve(addr)
-                    .await
-                    .expect("gRPC server failed");
+                // Mirror the HTTP side: the metrics layer is attached
+                // only when metrics are enabled, so the disabled path
+                // does no wrapping or measurement work at all. The two
+                // arms are duplicated because the layered server is a
+                // different type.
+                if metrics_enabled {
+                    Server::builder()
+                        .layer(MetricsGrpcLayer::new())
+                        .add_service(GuardianServer::new(service))
+                        .add_service(reflection_service)
+                        .serve(addr)
+                        .await
+                        .expect("gRPC server failed");
+                } else {
+                    Server::builder()
+                        .add_service(GuardianServer::new(service))
+                        .add_service(reflection_service)
+                        .serve(addr)
+                        .await
+                        .expect("gRPC server failed");
+                }
             });
 
             tasks.push(task);
@@ -149,4 +372,34 @@ impl ServerHandle {
             let _ = task.await;
         }
     }
+}
+
+const SESSION_SWEEP_INTERVAL_SECS: u64 = 60;
+
+/// Periodically reclaim expired operator sessions/challenges from the
+/// coordination store. Expiry is enforced on read regardless; this only frees
+/// rows (Postgres) or memory (in-memory).
+fn start_session_sweep_worker(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(SESSION_SWEEP_INTERVAL_SECS));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = state.dashboard.sweep_expired(state.clock.now()).await {
+                tracing::warn!(
+                    target: "dashboard.session_sweep",
+                    %error,
+                    "operator session/challenge sweep failed",
+                );
+            }
+            #[cfg(feature = "evm")]
+            if let Err(error) = state.evm.sessions.sweep_expired(state.clock.now()).await {
+                tracing::warn!(
+                    target: "evm.session_sweep",
+                    %error,
+                    "EVM session/challenge sweep failed",
+                );
+            }
+        }
+    });
 }

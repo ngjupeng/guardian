@@ -18,22 +18,31 @@ import { getProcedureRoot, type ProcedureName } from '../procedures.js';
 import { compileTxScript } from '../raw-client.js';
 import { normalizeHexWord } from '../utils/encoding.js';
 import { randomWord } from '../utils/random.js';
-import type { SignatureOptions } from './options.js';
+import type { MidenClientSignatureOptions, SignatureOptions } from './options.js';
 import type { SignatureScheme } from '../types.js';
 
-function buildProcedureThresholdAdvice(
-  procedure: ProcedureName,
-  threshold: number,
-): { configHash: Word; payload: FeltArray } {
+function buildProcedureThresholdFelts(procedure: ProcedureName, threshold: number): Felt[] {
   const procedureRoot = WordType.fromHex(normalizeHexWord(getProcedureRoot(procedure)));
-  const payload = new FeltArray([
+  return [
     ...procedureRoot.toFelts(),
     new Felt(BigInt(threshold)),
     new Felt(0n),
     new Felt(0n),
     new Felt(0n),
-  ]);
-  const configHash = Poseidon2.hashElements(payload);
+  ];
+}
+
+function buildProcedureThresholdAdvice(
+  procedure: ProcedureName,
+  threshold: number,
+): { configHash: Word; payload: FeltArray } {
+  // `Poseidon2.hashElements` consumes (frees) its `FeltArray` by value, so the
+  // advice payload must be a freshly built one — reusing the hashed array
+  // surfaces as "null pointer passed to rust" at the later `advice.insert`.
+  const configHash = Poseidon2.hashElements(
+    new FeltArray(buildProcedureThresholdFelts(procedure, threshold)),
+  );
+  const payload = new FeltArray(buildProcedureThresholdFelts(procedure, threshold));
   return { configHash, payload };
 }
 
@@ -67,6 +76,18 @@ end
   );
 }
 
+export function buildUpdateProcedureThresholdTransactionRequest(
+  client: MidenClient,
+  procedure: ProcedureName,
+  threshold: number,
+  options: MidenClientSignatureOptions,
+): Promise<{ request: TransactionRequest; salt: Word; configHash: Word }>;
+export function buildUpdateProcedureThresholdTransactionRequest(
+  client: WasmWebClient,
+  procedure: ProcedureName,
+  threshold: number,
+  options?: SignatureOptions,
+): Promise<{ request: TransactionRequest; salt: Word; configHash: Word }>;
 export async function buildUpdateProcedureThresholdTransactionRequest(
   client: MidenClient | WasmWebClient,
   procedure: ProcedureName,

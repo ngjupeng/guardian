@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum KeyStoreError {
@@ -66,13 +67,10 @@ impl<R: RngCore + Send + Sync> FilesystemKeyStore<R> {
             })?;
 
         let mut writer = BufWriter::new(file);
-        writer
-            .write_all(hex::encode(key_bytes).as_bytes())
-            .map_err(|error| {
-                KeyStoreError::StorageError(format!(
-                    "Failed to write key to file {filename}: {error}"
-                ))
-            })?;
+        let encoded = Zeroizing::new(hex::encode(key_bytes));
+        writer.write_all(encoded.as_bytes()).map_err(|error| {
+            KeyStoreError::StorageError(format!("Failed to write key to file {filename}: {error}"))
+        })?;
 
         writer.flush().map_err(|error| {
             KeyStoreError::StorageError(format!("Failed to flush key file {filename}: {error}"))
@@ -93,16 +91,16 @@ impl<R: RngCore + Send + Sync> FilesystemKeyStore<R> {
             })?;
 
         let mut reader = BufReader::new(file);
-        let mut hex_encoded = String::new();
+        let mut hex_encoded = Zeroizing::new(String::new());
         reader.read_line(&mut hex_encoded).map_err(|error| {
             KeyStoreError::StorageError(format!("Failed to read key from file {filename}: {error}"))
         })?;
 
-        let key_bytes = hex::decode(hex_encoded.trim()).map_err(|error| {
+        let key_bytes = Zeroizing::new(hex::decode(hex_encoded.trim()).map_err(|error| {
             KeyStoreError::DecodingError(format!(
                 "Failed to decode hex key from file {filename}: {error}"
             ))
-        })?;
+        })?);
 
         SecretKey::read_from_bytes(&key_bytes).map_err(|error| {
             KeyStoreError::DecodingError(format!(
@@ -217,7 +215,12 @@ mod tests {
     #[test]
     fn test_hash_pub_key() {
         use miden_protocol::Felt;
-        let pub_key = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
+        let pub_key = [
+            Felt::new_unchecked(1),
+            Felt::new_unchecked(2),
+            Felt::new_unchecked(3),
+            Felt::new_unchecked(4),
+        ];
         let hash1 = hash_pub_key(pub_key.into());
         let hash2 = hash_pub_key(pub_key.into());
 

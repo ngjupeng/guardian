@@ -7,7 +7,6 @@
 import {
   AccountBuilder,
   AccountComponent,
-  AccountType,
   AccountStorageMode,
   type MidenClient,
 } from '@miden-sdk/miden-sdk';
@@ -31,12 +30,13 @@ import { normalizeSignerCommitment } from '../utils/signature.js';
  *
  * @param midenClient - Initialized MidenClient
  * @param config - Multisig configuration
+ * @param midenRpcEndpoint - RPC endpoint for the MidenClient's network
  * @returns The created account and seed
  */
 export async function createMultisigAccount(
   midenClient: MidenClient,
   config: MultisigConfig,
-  midenRpcEndpoint?: string,
+  midenRpcEndpoint: string,
 ): Promise<CreateAccountResult> {
   validateMultisigConfig(config);
   const signatureScheme = config.signatureScheme ?? 'falcon';
@@ -57,7 +57,7 @@ export async function createMultisigAccount(
     ? 'openzeppelin::auth::multisig_ecdsa'
     : 'openzeppelin::auth::multisig';
 
-  const authBuilder = rawClient.createCodeBuilder();
+  const authBuilder = await rawClient.createCodeBuilder();
   authBuilder.linkModule(guardianLibraryPath, guardianMasm);
   authBuilder.linkModule(multisigLibraryPath, multisigMasm);
   const authComponentCode = authBuilder.compileAccountComponentCode(authComponentMasm);
@@ -75,8 +75,9 @@ export async function createMultisigAccount(
     ? AccountStorageMode.public()
     : AccountStorageMode.private();
 
+  // Miden 0.15: the account-ID no longer encodes account type; visibility is set
+  // via `storageMode()`, so the former `.accountType(...)` call is gone.
   const accountBuilder = new AccountBuilder(seed)
-    .accountType(AccountType.RegularAccountUpdatableCode)
     .storageMode(storageMode)
     .withAuthComponent(authComponent)
     .withBasicWalletComponent();

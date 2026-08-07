@@ -59,9 +59,15 @@ println!("Account registered on GUARDIAN endpoint: {}", client.guardian_endpoint
 use miden_multisig_client::TransactionType;
 use miden_objects::account::AccountId;
 
-let recipient = AccountId::from_hex("0x7bfb0f38b0fafa103f86a805594170")?;
-let faucet = AccountId::from_hex("0x7bfb0f38b0fafa103f86a805594171")?;
+let recipient = AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b")?;
+let faucet = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c")?;
 let tx = TransactionType::transfer(recipient, faucet, 1_000);
+
+// P2ID notes are public by default. For a private note (only its hash is
+// published on chain; the recipient needs the note shared out-of-band) use
+// `transfer_with_note_type`. `NoteType` is re-exported from `miden_protocol::note`.
+use miden_protocol::note::NoteType;
+let tx = TransactionType::transfer_with_note_type(recipient, faucet, 1_000, NoteType::Private);
 
 // Proposer creates the delta on GUARDIAN
 let proposal = client.propose_transaction(tx).await?;
@@ -76,6 +82,32 @@ client.sign_proposal(&to_sign.id).await?;
 
 // Once threshold is met, any cosigner can execute
 client.execute_proposal(&proposal.id).await?;
+```
+
+### Recovering From a Dead Transaction (Abandon)
+
+If `execute_proposal` dies after guardian approval (RPC submit failure,
+prover timeout, crash), the approved candidate keeps the account locked on
+GUARDIAN. Record an abandon intent and poll for the resolution:
+
+```rust
+use miden_multisig_client::{AbandonRequestState, AbandonStatus};
+
+// The nonce the proposal was pushed with (committed account nonce + 1).
+let state = client.abandon_candidate(nonce).await?;
+assert_eq!(state, AbandonRequestState::Pending);
+
+// The guardian's worker confirms over a short quarantine (typically well
+// under a minute) that the transaction did not land, then releases the
+// account.
+loop {
+    match client.abandon_status(nonce).await? {
+        AbandonStatus::Waiting => tokio::time::sleep(Duration::from_secs(5)).await,
+        AbandonStatus::Abandoned => break,           // account released
+        AbandonStatus::Landed => break,              // tx landed after all
+        AbandonStatus::Unexpected => anyhow::bail!("unexpected candidate state"),
+    }
+}
 ```
 
 ### Fallback to Offline (if GUARDIAN unavailable)
@@ -130,11 +162,103 @@ List notes from a specific faucet with a minimum amount filter:
 ```rust
 use miden_multisig_client::NoteFilter;
 
-let faucet = AccountId::from_hex("0x7bfb0f38b0fafa103f86a805594170")?;
+let faucet = AccountId::from_hex("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c")?;
 let filter = NoteFilter::by_faucet_min_amount(faucet, 5_000);
 let spendable = client.list_consumable_notes_filtered(filter).await?;
 ```
 
+
+### Custom Proposal Types
+
+GUARDIAN accepts any non-empty `proposal_type`, so an integration can propose a
+transaction the SDK does not model (an agglayer bridge note, an arbitrary dApp
+transaction) under its own label. The SDK normalizes the label to lowercase
+`snake_case` (trims and lowercases it, then requires `[a-z0-9_]+` — the same
+shape as built-in labels like `add_signer`), so `"B2Agg"` becomes `b2agg` and
+`"add signer"` / `"add-signer"` are rejected. Such a proposal buckets to
+`TransactionType::Custom` and keeps its normalized label in
+`ProposalMetadata.proposal_type`. It can be listed, signed, and
+exported/imported through the normal flow, but the generic SDK cannot build its
+on-chain transaction — the integration owns that recipe and drives execution.
+
+```rust
+use miden_client::Serializable;
+use miden_multisig_client::{build_p2id_transaction_request, generate_salt};
+use miden_protocol::note::NoteType;
+
+// Producer: build a transaction and propose it under a custom label.
+let salt = generate_salt();
+let mut request = build_p2id_transaction_request(
+    account.inner(), recipient, vec![asset], NoteType::Public, salt, std::iter::empty(),
+)?;
+let proposal = client.propose_custom_transaction(&request.to_bytes(), "b2agg").await?;
+
+// Cosigners review and sign through the usual list/sign flow.
+
+// Producer (once threshold is met): bind-check the request, fetch the validated
+// advice, inject it into the request, and submit. `prepare_custom_execution`
+// verifies the request against the signed commitment *before* the GUARDIAN ack.
+let advice = client.prepare_custom_execution(&proposal.id, &request.to_bytes()).await?;
+request.advice_map_mut().extend(advice);
+client.submit_transaction(request).await?;
+```
+
+The integration keeps only its own recipe (build inputs + salt) so it can
+reproduce the exact transaction at execute time — the SDK does not store the
+serialized request. The binding check guarantees the rebuilt transaction matches
+the commitment the cosigners signed.
+
+## Consume-notes metadata versions
+
+`consume_notes` proposals come in two metadata shapes. The discriminator
+is the `consume_notes_metadata_version` field on the wire.
+
+- **v1 (legacy)** — `consume_notes_metadata_version` absent on the wire.
+  The proposal carries only `note_ids`; the verifier rebuilds the
+  transaction request by fetching each note from its **own local Miden
+  store**. If the verifier does not have the note locally (cursor
+  advanced past the block, store was wiped, private-note transport
+  pruned the blob), verification fails with
+  `MultisigError::LegacyConsumeNotesNoteMissing` and the cosigner
+  cannot sign. This is the failure tracked by
+  [issue #229](https://github.com/OpenZeppelin/guardian/issues/229).
+- **v2 (self-contained)** — `consume_notes_metadata_version: 2` plus a
+  `consume_notes_notes` array carrying base64-serialized `Note` bytes
+  aligned by index with `note_ids`. Verification rebuilds the request
+  from the embedded notes alone — no local-store read, no network
+  call. This restores the same "rebuild from signed metadata" invariant
+  every other proposal type already satisfied (and that audit finding
+  **M-08** remediated for `p2id`).
+
+Proposal creation always emits v2 starting with this release; the
+proposer is the one party guaranteed to hold the notes locally. The
+per-proposal v2 payload is capped at `MAX_CONSUME_NOTES_METADATA_BYTES`
+(256 KiB) and the size is enforced at creation time so the failure
+surfaces to the proposer before any signature collection begins.
+
+### Error taxonomy
+
+All four errors below carry a stable, cross-SDK string code via
+`MultisigError::code()`. The TS SDK exposes the same identifiers as
+`Error.code`.
+
+| Variant | `.code()` | When |
+|---|---|---|
+| `NoteBindingMismatch` | `consume_notes_note_binding_mismatch` | v2: `notes.len() != note_ids.len()`, or `note.id() != note_ids[i]` |
+| `UnsupportedMetadataVersion { found }` | `consume_notes_unsupported_metadata_version` | Unrecognized version (including v1 on a cut-over build) |
+| `ConsumeNotesMetadataOversize { limit, actual }` | `consume_notes_metadata_oversize` | v2 metadata serialization exceeds 256 KiB at creation |
+| `LegacyConsumeNotesNoteMissing { note_id }` | `consume_notes_legacy_note_missing` | v1 path: local store does not contain the referenced note |
+
+### Cut-over policy
+
+The `legacy-consume-notes` Cargo feature (default-on in this transitional
+release) gates whether the crate accepts v1 metadata for verification.
+A future cut-over release will ship with `default = []`, at which point
+v1 proposals are refused with `UnsupportedMetadataVersion { found: None }`
+on every code path. Deployments should drain or re-propose any v1
+`consume_notes` proposals in flight before upgrading past the cut-over
+client version. Tracked by spec
+[`006-consume-notes-metadata`](../../speckit/features/006-consume-notes-metadata/spec.md).
 
 ## Demo CLI
 

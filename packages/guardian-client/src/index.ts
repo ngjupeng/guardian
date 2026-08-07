@@ -1,7 +1,16 @@
 export { GuardianHttpClient, GuardianHttpError } from './http.js';
+export type { GuardianErrorMeta } from './http.js';
+export {
+  GUARDIAN_ERROR_CODES,
+  isGuardianErrorCode,
+  normalizeGuardianErrorCode,
+} from './error-codes.js';
+export type { GuardianErrorCode } from './error-codes.js';
 export { RequestAuthPayload } from './auth-request.js';
 
 export type {
+  AbandonCandidateResponse,
+  AbandonStatus,
   Signer,
   FalconSignature,
   EcdsaSignature,
@@ -18,8 +27,11 @@ export type {
   ConfigureRequest,
   ConfigureResponse,
   PubkeyResponse,
+  StatusResponse,
   DeltaProposalRequest,
   DeltaProposalResponse,
   ProposalsResponse,
   SignProposalRequest,
+  LookupAccount,
+  LookupResponse,
 } from './types.js';

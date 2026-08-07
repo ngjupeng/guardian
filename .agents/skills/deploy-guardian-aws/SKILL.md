@@ -8,6 +8,9 @@ description: Deploy, update, inspect, and troubleshoot the repository AWS ECS en
 Read the current source of truth at the start of every task:
 
 - `docs/SERVER_AWS_DEPLOY.md`
+- `docs/PRODUCTION.md`
+- `docs/architecture/infra.md`
+- `docs/runbooks/secrets.md`
 - `scripts/aws-deploy.sh`
 - `infra/variables.tf`
 - `infra/terraform.tfvars.example`
@@ -18,6 +21,8 @@ Trust these sources in this order:
 1. `scripts/aws-deploy.sh` for supported commands, flags, and shell env vars
 2. `infra/*.tf` and `infra/variables.tf` for actual Terraform behavior
 3. `docs/SERVER_AWS_DEPLOY.md` and `infra/README.md` for operator workflow
+
+When deployment commands, Terraform variables, secret names, DNS behavior, runtime defaults, or supported stack topology change, update the matching operator docs in the same task. Use the Documentation Impact Check in `AGENTS.md` to avoid stale deploy guidance.
 
 ## Preflight
 
@@ -73,6 +78,15 @@ Use the deploy script env vars for the normal workflow:
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_PROXIED`
 - `GUARDIAN_NETWORK_TYPE`
+- `GUARDIAN_CORS_ALLOWED_ORIGINS`
+- `GUARDIAN_OPERATOR_PUBLIC_KEYS_JSON`
+- `GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ARN`
+- `GUARDIAN_EVM_CHAIN_CONFIG_FILE`
+- `GUARDIAN_EVM_ALLOWED_CHAIN_IDS`
+- `GUARDIAN_EVM_ALLOWED_CHAIN_IDS_SECRET_ARN`
+- `GUARDIAN_EVM_RPC_URLS`
+- `GUARDIAN_EVM_RPC_URLS_SECRET_ARN`
+- `GUARDIAN_EVM_ENTRYPOINT_ADDRESS`
 
 Use `TF_VAR_*` only for Terraform variables that the script does not map directly, such as:
 
@@ -101,6 +115,8 @@ Use `TF_VAR_*` only for Terraform variables that the script does not map directl
 - `TF_VAR_server_autoscaling_memory_target`
 - `TF_VAR_guardian_rate_burst_per_sec`
 - `TF_VAR_guardian_rate_per_min`
+- `TF_VAR_guardian_operator_public_keys`
+- `TF_VAR_guardian_operator_public_keys_secret_arn`
 - `TF_VAR_guardian_db_pool_max_size`
 - `TF_VAR_guardian_metadata_db_pool_max_size`
 - `TF_VAR_alb_ingress_cidrs`
@@ -156,3 +172,4 @@ Report:
 - Terraform outputs that changed
 - health checks performed
 - blockers found between state, docs, and Terraform code
+- docs checked or updated

@@ -1,12 +1,15 @@
 use crate::KeyStoreError;
 use miden_protocol::Word;
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{PublicKey, SecretKey, Signature};
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::{
+    PublicKey, Signature, SigningKey as SecretKey,
+};
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, KeyStoreError>;
 
@@ -62,13 +65,10 @@ impl FilesystemEcdsaKeyStore {
             })?;
 
         let mut writer = BufWriter::new(file);
-        writer
-            .write_all(hex::encode(key_bytes).as_bytes())
-            .map_err(|error| {
-                KeyStoreError::StorageError(format!(
-                    "Failed to write key to file {filename}: {error}"
-                ))
-            })?;
+        let encoded = Zeroizing::new(hex::encode(key_bytes));
+        writer.write_all(encoded.as_bytes()).map_err(|error| {
+            KeyStoreError::StorageError(format!("Failed to write key to file {filename}: {error}"))
+        })?;
 
         writer.flush().map_err(|error| {
             KeyStoreError::StorageError(format!("Failed to flush key file {filename}: {error}"))
@@ -89,16 +89,16 @@ impl FilesystemEcdsaKeyStore {
             })?;
 
         let mut reader = BufReader::new(file);
-        let mut hex_encoded = String::new();
+        let mut hex_encoded = Zeroizing::new(String::new());
         reader.read_line(&mut hex_encoded).map_err(|error| {
             KeyStoreError::StorageError(format!("Failed to read key from file {filename}: {error}"))
         })?;
 
-        let key_bytes = hex::decode(hex_encoded.trim()).map_err(|error| {
+        let key_bytes = Zeroizing::new(hex::decode(hex_encoded.trim()).map_err(|error| {
             KeyStoreError::DecodingError(format!(
                 "Failed to decode hex key from file {filename}: {error}"
             ))
-        })?;
+        })?);
 
         SecretKey::read_from_bytes(&key_bytes).map_err(|error| {
             KeyStoreError::DecodingError(format!(

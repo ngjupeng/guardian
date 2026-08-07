@@ -16,6 +16,24 @@ server_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/guardian-server
 # Optional: Miden network for the deployed GUARDIAN server
 # server_network_type = "MidenTestnet"
 
+# Optional: Falcon public keys allowed to log in as dashboard operators.
+# When set, Terraform creates <stack_name>/server/operator-public-keys.
+# guardian_operator_public_keys = [
+#   "0x<alice-falcon-public-key>",
+#   "0x<bob-falcon-public-key>",
+# ]
+
+# Optional: existing Secrets Manager secret ARN containing a JSON array of Falcon public keys.
+# When set, this takes precedence over guardian_operator_public_keys.
+# guardian_operator_public_keys_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:guardian/operators"
+
+# Optional: EVM runtime configuration when using Terraform directly.
+# scripts/aws-deploy.sh derives these from config/evm/chains.json by default.
+# guardian_evm_allowed_chain_ids = "1,11155111"
+# guardian_evm_rpc_urls = "1=https://ethereum-rpc.publicnode.com,11155111=https://ethereum-sepolia-rpc.publicnode.com"
+# guardian_evm_entrypoint_address = "0x433709009b8330fda32311df1c2afa402ed8d009"
+# guardian_cors_allowed_origins = "https://accounts.openzeppelin.com"
+
 # Optional: VPC and subnet configuration
 # If not specified, uses the default VPC and all its subnets
 # vpc_id     = "vpc-xxxxxxxx"
@@ -56,6 +74,7 @@ server_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/guardian-server
 # guardian_rate_per_min = 5000
 # guardian_db_pool_max_size = 32
 # guardian_metadata_db_pool_max_size = 32
+# guardian_canonicalization_fast_promotion_enabled = false
 
 # Optional: Resource naming (defaults match the original bash script)
 # cluster_name                 = "guardian-cluster"

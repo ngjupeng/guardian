@@ -1,5 +1,7 @@
-use crate::metadata::{AccountMetadata, MetadataStore};
+use crate::metadata::{AccountListCursor, AccountMetadata, Auth, MetadataStore};
+use crate::services::account_status::{AccountStatus, PauseTransition};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,13 +103,21 @@ impl MetadataStore for FilesystemMetadataStore {
     async fn set(&self, metadata: AccountMetadata) -> Result<(), String> {
         let account_id = metadata.account_id.clone();
 
-        // Update cache
+        // Mirror the Postgres `set` semantics: pause and released state
+        // are owned by `set_pause` / `clear_pause` and `set_released` /
+        // `clear_released` and must not be changed by a generic metadata
+        // write (e.g. reconfigure, EVM re-register).
+        let mut metadata = metadata;
         {
             let mut cache = self.cache.write().await;
+            if let Some(existing) = cache.get(&account_id) {
+                metadata.paused_at = existing.paused_at;
+                metadata.paused_reason = existing.paused_reason.clone();
+                metadata.released_at = existing.released_at;
+            }
             cache.insert(account_id, metadata);
         }
 
-        // Persist to disk
         let cache = self.cache.read().await;
         self.persist(&cache).await
     }
@@ -115,6 +125,51 @@ impl MetadataStore for FilesystemMetadataStore {
     async fn list(&self) -> Result<Vec<String>, String> {
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
+    }
+
+    async fn list_paged(
+        &self,
+        limit: u32,
+        cursor: Option<AccountListCursor>,
+        paused: Option<bool>,
+    ) -> Result<Vec<AccountMetadata>, String> {
+        let cache = self.cache.read().await;
+        let cutoff = cursor.map(|c| (c.last_updated_at, c.last_account_id));
+        let mut rows: Vec<AccountMetadata> = cache
+            .values()
+            .filter(|m| match paused {
+                Some(true) => m.paused_at.is_some(),
+                Some(false) => m.paused_at.is_none(),
+                None => true,
+            })
+            .filter(|m| match &cutoff {
+                None => true,
+                Some((cutoff_ts, cutoff_id)) => {
+                    let parsed = chrono::DateTime::parse_from_rfc3339(&m.updated_at)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
+                    match parsed {
+                        Some(ts) => {
+                            ts < *cutoff_ts || (ts == *cutoff_ts && m.account_id > *cutoff_id)
+                        }
+                        // If updated_at can't be parsed, drop the row
+                        // from the cursor walk rather than risk
+                        // misordering (matches the spec's stable
+                        // contract for well-formed timestamps).
+                        None => false,
+                    }
+                }
+            })
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            // Newest-first by updated_at, then account_id ASC.
+            let ats = chrono::DateTime::parse_from_rfc3339(&a.updated_at).ok();
+            let bts = chrono::DateTime::parse_from_rfc3339(&b.updated_at).ok();
+            bts.cmp(&ats).then_with(|| a.account_id.cmp(&b.account_id))
+        });
+        rows.truncate(limit as usize);
+        Ok(rows)
     }
 
     async fn list_with_pending_candidates(&self) -> Result<Vec<String>, String> {
@@ -149,5 +204,259 @@ impl MetadataStore for FilesystemMetadataStore {
 
         self.persist(&cache).await?;
         Ok(true)
+    }
+
+    /// First-writer-wins pause: re-pause leaves the original
+    /// `paused_at`/`paused_reason` intact. Serialized through the
+    /// existing in-memory write lock.
+    async fn set_pause(
+        &self,
+        account_id: &str,
+        now: DateTime<Utc>,
+        reason: &str,
+    ) -> Result<PauseTransition, String> {
+        let mut cache = self.cache.write().await;
+        let metadata = cache
+            .get_mut(account_id)
+            .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+        let was_paused = metadata.paused_at.is_some();
+        if !was_paused {
+            metadata.paused_at = Some(now);
+            metadata.paused_reason = Some(reason.to_string());
+        }
+        let transition = PauseTransition {
+            before_state: if was_paused {
+                AccountStatus::Paused
+            } else {
+                AccountStatus::Active
+            },
+            after_state: AccountStatus::Paused,
+            paused_at: metadata.paused_at,
+            paused_reason: metadata.paused_reason.clone(),
+        };
+
+        self.persist(&cache).await?;
+        Ok(transition)
+    }
+
+    async fn clear_pause(&self, account_id: &str) -> Result<PauseTransition, String> {
+        let mut cache = self.cache.write().await;
+        let metadata = cache
+            .get_mut(account_id)
+            .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+        let was_paused = metadata.paused_at.is_some();
+        metadata.paused_at = None;
+        metadata.paused_reason = None;
+        let transition = PauseTransition {
+            before_state: if was_paused {
+                AccountStatus::Paused
+            } else {
+                AccountStatus::Active
+            },
+            after_state: AccountStatus::Active,
+            paused_at: None,
+            paused_reason: None,
+        };
+
+        self.persist(&cache).await?;
+        Ok(transition)
+    }
+
+    async fn set_released(&self, account_id: &str, now: DateTime<Utc>) -> Result<bool, String> {
+        let mut cache = self.cache.write().await;
+        let metadata = cache
+            .get_mut(account_id)
+            .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+        // First-writer-wins: keep the original released_at.
+        if metadata.released_at.is_some() {
+            return Ok(false);
+        }
+        metadata.released_at = Some(now);
+
+        self.persist(&cache).await?;
+        Ok(true)
+    }
+
+    async fn clear_released(&self, account_id: &str) -> Result<(), String> {
+        let mut cache = self.cache.write().await;
+        let metadata = cache
+            .get_mut(account_id)
+            .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+        if metadata.released_at.is_none() {
+            return Ok(());
+        }
+        metadata.released_at = None;
+
+        self.persist(&cache).await
+    }
+
+    async fn find_by_cosigner_commitment(&self, commitment: &str) -> Result<Vec<String>, String> {
+        let cache = self.cache.read().await;
+        let mut matches = Vec::new();
+        for (account_id, metadata) in cache.iter() {
+            let commitments = match &metadata.auth {
+                Auth::MidenFalconRpo {
+                    cosigner_commitments,
+                }
+                | Auth::MidenEcdsa {
+                    cosigner_commitments,
+                } => cosigner_commitments.as_slice(),
+                // EVM accounts use a different authorization model and must
+                // never appear in lookup results.
+                Auth::EvmEcdsa { .. } => continue,
+            };
+            if commitments.iter().any(|c| c == commitment) {
+                matches.push(account_id.clone());
+            }
+        }
+        Ok(matches)
+    }
+}
+
+#[cfg(all(test, not(any(feature = "integration", feature = "e2e"))))]
+mod pause_tests {
+    use super::*;
+    use crate::metadata::{Auth, NetworkConfig};
+    use chrono::TimeZone;
+
+    async fn fresh_store() -> (FilesystemMetadataStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemMetadataStore::new(dir.path().to_path_buf())
+            .await
+            .unwrap();
+        store
+            .set(AccountMetadata {
+                account_id: "acct".into(),
+                auth: Auth::MidenFalconRpo {
+                    cosigner_commitments: vec![],
+                },
+                network_config: NetworkConfig::Miden {
+                    network_type: crate::metadata::network::MidenNetworkType::Testnet,
+                },
+                created_at: "2026-05-19T10:00:00Z".into(),
+                updated_at: "2026-05-19T10:00:00Z".into(),
+                has_pending_candidate: false,
+                last_auth_timestamp: None,
+                paused_at: None,
+                paused_reason: None,
+                released_at: None,
+            })
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn set_pause_is_first_writer_wins() {
+        let (store, _dir) = fresh_store().await;
+        let first = Utc.with_ymd_and_hms(2026, 5, 19, 14, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 5, 19, 15, 30, 0).unwrap();
+
+        let t1 = store.set_pause("acct", first, "incident A").await.unwrap();
+        assert_eq!(t1.before_state, AccountStatus::Active);
+        assert_eq!(t1.after_state, AccountStatus::Paused);
+        assert_eq!(t1.paused_at, Some(first));
+        assert_eq!(t1.paused_reason.as_deref(), Some("incident A"));
+
+        // Re-pause: original timestamp + reason preserved.
+        let t2 = store.set_pause("acct", later, "incident B").await.unwrap();
+        assert_eq!(t2.before_state, AccountStatus::Paused);
+        assert_eq!(t2.after_state, AccountStatus::Paused);
+        assert_eq!(t2.paused_at, Some(first), "original paused_at preserved");
+        assert_eq!(
+            t2.paused_reason.as_deref(),
+            Some("incident A"),
+            "original reason preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_pause_is_idempotent_on_active_account() {
+        let (store, _dir) = fresh_store().await;
+        let transition = store.clear_pause("acct").await.unwrap();
+        assert_eq!(transition.before_state, AccountStatus::Active);
+        assert_eq!(transition.after_state, AccountStatus::Active);
+        assert!(transition.paused_at.is_none());
+        assert!(transition.paused_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn pause_then_clear_round_trip() {
+        let (store, _dir) = fresh_store().await;
+        let ts = Utc.with_ymd_and_hms(2026, 5, 19, 14, 0, 0).unwrap();
+        store.set_pause("acct", ts, "compromise").await.unwrap();
+
+        let t = store.clear_pause("acct").await.unwrap();
+        assert_eq!(t.before_state, AccountStatus::Paused);
+        assert_eq!(t.after_state, AccountStatus::Active);
+
+        let post = store.get("acct").await.unwrap().unwrap();
+        assert!(post.paused_at.is_none());
+        assert!(post.paused_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_released_is_first_writer_wins() {
+        let (store, _dir) = fresh_store().await;
+        let first = Utc.with_ymd_and_hms(2026, 7, 6, 10, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 7, 6, 11, 0, 0).unwrap();
+
+        assert!(store.set_released("acct", first).await.unwrap());
+        // Second release is a no-op that reports "not newly released".
+        assert!(!store.set_released("acct", later).await.unwrap());
+
+        let post = store.get("acct").await.unwrap().unwrap();
+        assert_eq!(
+            post.released_at,
+            Some(first),
+            "original released_at preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_released_missing_account_errors() {
+        let (store, _dir) = fresh_store().await;
+        let ts = Utc.with_ymd_and_hms(2026, 7, 6, 10, 0, 0).unwrap();
+        assert!(store.set_released("missing", ts).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn clear_released_reactivates_and_is_idempotent() {
+        let (store, _dir) = fresh_store().await;
+        let ts = Utc.with_ymd_and_hms(2026, 7, 6, 10, 0, 0).unwrap();
+        store.set_released("acct", ts).await.unwrap();
+
+        store.clear_released("acct").await.unwrap();
+        let post = store.get("acct").await.unwrap().unwrap();
+        assert!(post.released_at.is_none());
+
+        // Idempotent on an already-active account.
+        store.clear_released("acct").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_set_preserves_released_state() {
+        let (store, _dir) = fresh_store().await;
+        let ts = Utc.with_ymd_and_hms(2026, 7, 6, 10, 0, 0).unwrap();
+        store.set_released("acct", ts).await.unwrap();
+
+        // A generic metadata write (reconfigure-style) that carries
+        // released_at: None must NOT clear the released state — only
+        // clear_released may.
+        let mut refreshed = store.get("acct").await.unwrap().unwrap();
+        refreshed.released_at = None;
+        refreshed.updated_at = "2026-07-06T12:00:00Z".into();
+        store.set(refreshed).await.unwrap();
+
+        let post = store.get("acct").await.unwrap().unwrap();
+        assert_eq!(
+            post.released_at,
+            Some(ts),
+            "generic set must not clear released_at"
+        );
     }
 }

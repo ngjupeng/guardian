@@ -213,6 +213,68 @@ Canary checks:
 - if consume executes but the vault remains empty, mark the canary failed
 - if self-P2ID executes but no new note appears after final sync, mark the canary failed
 
+## `private-note-roundtrip-canary`
+
+Use when:
+
+- private P2ID note behavior or note export/import changed (issues #322, #356)
+- `exportNote` / `importNote` / `getP2idNoteId` harness commands changed
+- the prompt asks to validate out-of-band note transfer or private note consumption
+
+Setup:
+
+1. Run the `payment-roundtrip-canary` setup through vault funding: browsers A and B on one 2-of-2 account, faucet receipt consumed so the vault holds an asset.
+
+Steps:
+
+1. In A, create a self-addressed **private** P2ID proposal:
+   ```js
+   const { detectedConfig, multisig } = await window.smoke.status();
+   const asset = detectedConfig.vaultBalances[0];
+   const payment = await window.smoke.createProposal({
+     type: 'p2id',
+     recipientId: multisig.accountId,
+     faucetId: asset.faucetId,
+     amount: asset.amount,
+     noteType: 'private',
+   });
+   ```
+2. Still in A, resolve the note ID **before executing** (it derives from the pre-execution vault state):
+   ```js
+   const { noteId } = await window.smoke.getP2idNoteId({ proposalId: payment.proposal.id });
+   ```
+3. In B, sign the proposal. In A, execute it.
+4. In B, `sync()` and confirm `listConsumableNotes()` does NOT show the private note (only its commitment is on chain; B has a separate local store).
+5. In A, export the note file:
+   ```js
+   const { noteFileBase64 } = await window.smoke.exportNote({ noteId });
+   ```
+6. Hand the base64 string to B out-of-band (copy between consoles) and import it there:
+   ```js
+   const imported = await window.smoke.importNote({ noteFileBase64 });
+   ```
+   `importNote` syncs afterwards; the note should appear in `imported.status.consumableNotes`.
+7. In B, create a consume-notes proposal with the imported note ID.
+8. In A, `sync()` until the note appears in `listConsumableNotes()` there too, then sign the proposal. (The sender's store knows the full note and self-heals once a sync attaches the inclusion proof; a cosigner browser that never created nor imported the note must `importNote` first.)
+9. Execute, sync both browsers, and verify the vault balance reflects the reconsumed asset.
+
+Expect:
+
+- the proposal metadata carries `noteType: 'private'`
+- `getP2idNoteId` returns the same ID the export later resolves
+- before import, B cannot see the private note via sync
+- `exportNote` returns non-empty base64 and `importNote` in B returns the note ID
+- after import, the note is consumable in B and the consume proposal executes normally
+
+Canary checks:
+
+- if the private note IS visible in B before import, report it — the note leaked publicly and the private path is not being exercised
+- if `exportNote` fails with a not-found error in A after execution, report it with the exact message
+- if import succeeds but the note never becomes consumable after sync, report the sync attempt count and elapsed wait
+- if signing fails with `metadata does not match tx_summary`, the signer's store does not yet hold the note with its inclusion proof — sync (or `importNote`) until the note lists as consumable and retry; report it as a failure only if it persists after that
+- if consume execution fails with a note-binding or missing-note error, report it with the exact message
+- record elapsed time for P2ID execute, export, import, first consumability after import, and consume execute
+
 ## `switch-guardian-offline-canary`
 
 Use when:
@@ -362,3 +424,55 @@ Expect:
 - state fetch succeeds
 - local and on-chain commitments match
 - post-execute state verification reflects the updated account state
+
+## `recover-by-key-canary`
+
+Use when:
+
+- `recoverByKey`, `lookupAccountByKeyCommitment`, `lookup_grpc.rs`, or any related code path changed.
+- The recovery UX shape changed (signer scope, return shape, error semantics on per-match `getState`).
+
+### Notes before running
+
+**Signer regeneration (Outcome Y).** `examples/_shared/multisig-browser/initClient.ts` regenerates Falcon and ECDSA local signers on every page load (`AuthSecretKey.rpoFalconWithRNG(undefined)`). A device-loss simulation via `clearLocalState` + reload would lose the signer that authorizes the just-created account. The canary therefore asserts the SDK round-trip (key → lookup → state), not seed-derivation persistence. A future change that persists local signers across reset would unlock the broader simulation.
+
+**Browser-vs-Rust create flow difference.** In `examples/demo` (Rust), the `Create multisig account` action atomically (a) builds the account, (b) submits to Miden RPC, and (c) registers with GUARDIAN. In `examples/smoke-web`, `window.smoke.createAccount` only does (a) and (b); GUARDIAN registration is a separate `window.smoke.registerOnGuardian()` call (mirroring the "Register on Guardian" button). If you skip step 5 below, `recoverByKey` will return `[]` because GUARDIAN has no record of the account yet — that's expected behavior, not a regression.
+
+### Steps
+
+1. Start GUARDIAN and `examples/smoke-web`.
+2. Browser A: page-load bootstrap reaches `ready`. Capture `status().localSigners.falconCommitment` as `coldCommitment`.
+3. Browser B: bootstrap, capture commitment.
+4. Browser A:
+   ```js
+   await window.smoke.createAccount({
+     threshold: 2,
+     otherCommitments: ['<browser-B commitment>'],
+   });
+   ```
+   Capture `status().multisig.accountId` as `originalAccountId`.
+5. Browser A — register the account with GUARDIAN. **Required**; without this, GUARDIAN has no authorization record for `coldCommitment` and step 6 will return `[]`:
+   ```js
+   await window.smoke.registerOnGuardian();
+   ```
+6. Browser A (same session — keys still in memory):
+   ```js
+   const matches = await window.smoke.recoverByKey();
+   ```
+   Assert: `matches.length >= 1` and at least one entry's `accountId` equals `originalAccountId`.
+7. Browser A: paste `originalAccountId` into the Account ID field, run `await window.smoke.loadAccount({ accountId: originalAccountId })`, then `sync`, then `verifyStateCommitment`. Assert: `localCommitment === onChainCommitment`.
+8. Capture `recoverByKey` `durationMs` from `window.smoke.events()`.
+
+### Pass criteria
+
+- recovery returns the originally-created account
+- loaded recovered account's state commitment matches on-chain commitment
+- `events()` shows a successful `recoverByKey` entry with non-zero duration
+
+### Failure indicators
+
+- `matches.length === 0` **after step 5 succeeded** (lookup auth or routing regression — distinct from "skipped step 5" where empty is expected).
+- thrown auth/unauthenticated error (proof-of-possession metadata regression)
+- recovered `accountId` differs from `originalAccountId` (server-side index regression)
+- `verifyStateCommitment` mismatch after recover + load (state-fetch regression)
+

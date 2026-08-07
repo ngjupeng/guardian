@@ -7,21 +7,65 @@ use base64::Engine;
 use serde_json::Value;
 use std::sync::Arc;
 
+mod abandon_candidate;
+pub mod account_status;
 mod configure_account;
+mod dashboard_account_delta_detail;
+mod dashboard_account_deltas;
+mod dashboard_account_proposals;
+mod dashboard_account_snapshot;
+mod dashboard_accounts;
+mod dashboard_global_deltas;
+mod dashboard_global_proposals;
+mod dashboard_info;
+mod dashboard_pagination;
 mod delta_commit;
 mod get_delta;
 mod get_delta_proposal;
 mod get_delta_proposals;
 mod get_delta_since;
 mod get_state;
+mod lookup_account;
+pub mod pause_account;
 mod push_delta;
 mod push_delta_proposal;
+pub mod release_on_switch;
 mod sign_delta_proposal;
+mod status;
+pub mod unpause_account;
+
+pub use abandon_candidate::{
+    AbandonCandidateParams, AbandonCandidateResult, AbandonState, abandon_candidate,
+};
 
 pub use crate::jobs::canonicalization::{
     process_canonicalizations_now, start_canonicalization_worker,
 };
 pub use configure_account::{ConfigureAccountParams, ConfigureAccountResult, configure_account};
+pub use dashboard_account_delta_detail::{
+    DashboardDeltaDetail, DetailIncludeFlags, get_account_delta_detail,
+};
+pub use dashboard_account_deltas::{
+    DashboardDeltaEntry, DashboardDeltaStatus, list_account_deltas,
+};
+pub use dashboard_account_proposals::{DashboardProposalEntry, list_account_proposals};
+pub use dashboard_account_snapshot::{
+    DashboardAccountSnapshot, DashboardVaultFungibleEntry, DashboardVaultNonFungibleEntry,
+    DashboardVaultSnapshot, get_account_snapshot,
+};
+pub use dashboard_accounts::{
+    DashboardAccountDetail, DashboardAccountStateStatus, DashboardAccountSummary,
+    GetDashboardAccountResult, get_dashboard_account, list_dashboard_accounts_paged,
+};
+pub use dashboard_global_deltas::{
+    DashboardGlobalDeltaEntry, list_global_deltas, parse_status_filter,
+};
+pub use dashboard_global_proposals::{DashboardGlobalProposalEntry, list_global_proposals};
+pub use dashboard_info::{
+    AGG_DELTA_STATUS_COUNTS, AGG_IN_FLIGHT_PROPOSAL_COUNT, AGG_LATEST_ACTIVITY,
+    DashboardDeltaStatusCounts, DashboardInfoResponse, DashboardServiceStatus, get_dashboard_info,
+};
+pub use dashboard_pagination::{DEFAULT_LIMIT, MAX_LIMIT, PagedResult, parse_cursor, parse_limit};
 pub use get_delta::{GetDeltaParams, GetDeltaResult, get_delta};
 pub use get_delta_proposal::{GetDeltaProposalParams, GetDeltaProposalResult, get_delta_proposal};
 pub use get_delta_proposals::{
@@ -29,6 +73,7 @@ pub use get_delta_proposals::{
 };
 pub use get_delta_since::{GetDeltaSinceParams, GetDeltaSinceResult, get_delta_since};
 pub use get_state::{GetStateParams, GetStateResult, get_state};
+pub use lookup_account::{LookupAccountParams, LookupAccountResult, lookup_account};
 pub use push_delta::{PushDeltaParams, PushDeltaResult, push_delta};
 pub use push_delta_proposal::{
     PushDeltaProposalParams, PushDeltaProposalResult, push_delta_proposal,
@@ -36,6 +81,7 @@ pub use push_delta_proposal::{
 pub use sign_delta_proposal::{
     SignDeltaProposalParams, SignDeltaProposalResult, sign_delta_proposal,
 };
+pub use status::{StatusResponse, build_status};
 
 #[derive(Clone)]
 pub struct ResolvedAccount {
@@ -90,14 +136,28 @@ pub async fn resolve_account(
         )));
     }
 
-    metadata.auth.verify(account_id, creds).map_err(|e| {
-        tracing::warn!(
-            account_id = %account_id,
-            error = %e,
-            "Authentication failed in resolve_account"
-        );
-        GuardianError::AuthenticationFailed(e)
-    })?;
+    if metadata.network_config.is_evm() {
+        return Err(GuardianError::UnsupportedForNetwork {
+            network: "evm".to_string(),
+            operation: "delta_api".to_string(),
+        });
+    } else {
+        if matches!(metadata.auth, crate::metadata::Auth::EvmEcdsa { .. }) {
+            return Err(GuardianError::UnsupportedForNetwork {
+                network: "evm".to_string(),
+                operation: "delta_api".to_string(),
+            });
+        }
+
+        metadata.auth.verify(account_id, creds).map_err(|e| {
+            tracing::warn!(
+                account_id = %account_id,
+                error = %e,
+                "Authentication failed in resolve_account"
+            );
+            GuardianError::AuthenticationFailed(e)
+        })?;
+    }
 
     // Atomically check and update the last auth timestamp for replay protection
     let now_str = state.clock.now_rfc3339();
@@ -129,16 +189,6 @@ pub async fn resolve_account(
 
     Ok(ResolvedAccount { metadata, storage })
 }
-
-const VALID_PROPOSAL_TYPES: &[&str] = &[
-    "add_signer",
-    "remove_signer",
-    "change_threshold",
-    "update_procedure_threshold",
-    "switch_guardian",
-    "consume_notes",
-    "p2id",
-];
 
 pub fn normalize_payload(payload: Value) -> Result<Value> {
     let mut obj = payload.as_object().cloned().ok_or_else(|| {
@@ -188,12 +238,11 @@ fn normalize_metadata(metadata: Value) -> Result<Value> {
         .ok_or_else(|| {
             GuardianError::InvalidDelta("metadata.proposal_type is required".to_string())
         })?;
-    if !VALID_PROPOSAL_TYPES.contains(&proposal_type) {
-        return Err(GuardianError::InvalidDelta(format!(
-            "Unknown proposal_type '{}'. Must be one of: {}",
-            proposal_type,
-            VALID_PROPOSAL_TYPES.join(", ")
-        )));
+    let proposal_type = proposal_type.trim();
+    if proposal_type.is_empty() {
+        return Err(GuardianError::InvalidDelta(
+            "metadata.proposal_type must not be empty".to_string(),
+        ));
     }
     obj.insert(
         "proposal_type".to_string(),
@@ -279,6 +328,73 @@ mod normalize_tests {
             Some(2)
         );
     }
+
+    #[test]
+    fn normalize_payload_accepts_custom_proposal_type() {
+        let payload = json!({
+            "tx_summary": { "data": "dGVzdA==" },
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "b2agg",
+                "description": "custom bridge note"
+            }
+        });
+
+        let normalized = normalize_payload(payload).expect("custom type should normalize");
+        let metadata = normalized
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be an object");
+
+        assert_eq!(
+            metadata.get("proposal_type").and_then(Value::as_str),
+            Some("b2agg")
+        );
+    }
+
+    #[test]
+    fn normalize_payload_persists_trimmed_proposal_type() {
+        let payload = json!({
+            "tx_summary": { "data": "dGVzdA==" },
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "  b2agg  ",
+                "description": "padded label"
+            }
+        });
+
+        let normalized = normalize_payload(payload).expect("padded type should normalize");
+        let metadata = normalized
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be an object");
+
+        assert_eq!(
+            metadata.get("proposal_type").and_then(Value::as_str),
+            Some("b2agg"),
+            "the stored proposal_type must be the trimmed value that was validated"
+        );
+    }
+
+    #[test]
+    fn normalize_payload_rejects_empty_proposal_type() {
+        let payload = json!({
+            "tx_summary": { "data": "dGVzdA==" },
+            "signatures": [],
+            "metadata": {
+                "proposal_type": "   ",
+                "description": "blank"
+            }
+        });
+
+        let error = normalize_payload(payload).expect_err("blank proposal_type must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("proposal_type must not be empty"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[cfg(all(test, not(any(feature = "integration", feature = "e2e"))))]
@@ -290,7 +406,6 @@ mod tests {
     use crate::metadata::auth::Auth;
     use crate::testing::mocks::{MockMetadataStore, MockNetworkClient, MockStorageBackend};
     use chrono::{TimeZone, Utc};
-    use tokio::sync::Mutex;
 
     async fn create_test_state_with_mocks_and_clock(
         metadata: MockMetadataStore,
@@ -309,10 +424,14 @@ mod tests {
         AppState {
             storage: Arc::new(storage),
             metadata: Arc::new(metadata),
-            network_client: Arc::new(Mutex::new(network)),
+            network_client: Arc::new(network),
             ack,
             canonicalization: None,
             clock: Arc::new(clock),
+            dashboard: Arc::new(crate::dashboard::DashboardState::default()),
+            auditor: Arc::new(crate::audit::LogAuditor::new()),
+            #[cfg(feature = "evm")]
+            evm: Arc::new(crate::evm::EvmAppState::for_tests()),
         }
     }
 
@@ -322,10 +441,14 @@ mod tests {
             auth: Auth::MidenFalconRpo {
                 cosigner_commitments: commitments,
             },
+            network_config: crate::metadata::NetworkConfig::miden_default(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             has_pending_candidate: false,
             last_auth_timestamp: None,
+            paused_at: None,
+            paused_reason: None,
+            released_at: None,
         }
     }
 
@@ -333,7 +456,7 @@ mod tests {
     async fn test_resolve_account_timestamp_too_old() {
         // Set server clock to a specific time
         let clock = MockClock::new(Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap());
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
         let (signer_pubkey, signer_commitment, _, _) =
             crate::testing::helpers::generate_falcon_signature(account_id);
 
@@ -366,7 +489,7 @@ mod tests {
     async fn test_resolve_account_timestamp_in_future() {
         // Set server clock to a specific time
         let clock = MockClock::new(Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap());
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
         let (signer_pubkey, signer_commitment, _, _) =
             crate::testing::helpers::generate_falcon_signature(account_id);
 
@@ -399,7 +522,7 @@ mod tests {
     async fn test_resolve_account_replay_attack_detected() {
         // Set server clock to a specific time
         let clock = MockClock::new(Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap());
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
 
         // Create a signer and generate signature with the mock clock's timestamp
         let test_signer = crate::testing::helpers::TestSigner::new();
@@ -433,7 +556,7 @@ mod tests {
     async fn test_resolve_account_cas_storage_error() {
         // Set server clock to a specific time
         let clock = MockClock::new(Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap());
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
 
         // Create a signer and generate signature with the mock clock's timestamp
         let test_signer = crate::testing::helpers::TestSigner::new();
@@ -466,7 +589,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_account_not_found() {
         let clock = MockClock::default();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
         let (signer_pubkey, _, signer_signature, signer_timestamp) =
             crate::testing::helpers::generate_falcon_signature(account_id);
 
@@ -489,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_account_metadata_storage_error() {
         let clock = MockClock::default();
-        let account_id = "0x7bfb0f38b0fafa103f86a805594170";
+        let account_id = "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b";
         let (signer_pubkey, _, signer_signature, signer_timestamp) =
             crate::testing::helpers::generate_falcon_signature(account_id);
 

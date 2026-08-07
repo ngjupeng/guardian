@@ -70,6 +70,50 @@ output "database_url_secret_arn" {
   value       = aws_secretsmanager_secret.database_url.arn
 }
 
+output "operator_public_keys_secret_arn" {
+  description = "Secrets Manager ARN used by the server for dashboard operator public keys"
+  value       = local.operator_public_keys_secret_arn
+}
+
+output "operator_public_keys_secret_name" {
+  description = "Managed Secrets Manager name for dashboard operator public keys when Terraform creates it"
+  value       = local.managed_operator_public_keys_secret_enabled ? local.operator_public_keys_secret_name : ""
+}
+
+output "guardian_evm_allowed_chain_ids_secret_arn" {
+  description = "Secrets Manager ARN used by the server for EVM allowed chain IDs"
+  value       = local.evm_allowed_chain_ids_secret_arn
+  sensitive   = true
+}
+
+output "guardian_evm_allowed_chain_ids_secret_name" {
+  description = "Managed Secrets Manager name for EVM allowed chain IDs when Terraform creates it"
+  value       = local.managed_evm_allowed_chain_ids_secret_enabled ? local.evm_allowed_chain_ids_secret_name : ""
+  sensitive   = true
+}
+
+output "guardian_evm_rpc_urls_secret_arn" {
+  description = "Secrets Manager ARN used by the server for EVM RPC URLs"
+  value       = local.evm_rpc_urls_secret_arn
+  sensitive   = true
+}
+
+output "guardian_evm_rpc_urls_secret_name" {
+  description = "Managed Secrets Manager name for EVM RPC URLs when Terraform creates it"
+  value       = local.managed_evm_rpc_urls_secret_enabled ? local.evm_rpc_urls_secret_name : ""
+  sensitive   = true
+}
+
+output "guardian_evm_entrypoint_address" {
+  description = "Shared EVM EntryPoint address configured for the server"
+  value       = var.guardian_evm_entrypoint_address
+}
+
+output "guardian_cors_allowed_origins" {
+  description = "Explicit CORS origins configured for the server"
+  value       = var.guardian_cors_allowed_origins
+}
+
 output "ack_falcon_secret_name" {
   description = "Secrets Manager name for the Falcon ack key"
   value       = local.ack_falcon_secret_name
@@ -78,6 +122,16 @@ output "ack_falcon_secret_name" {
 output "ack_ecdsa_secret_name" {
   description = "Secrets Manager name for the ECDSA ack key"
   value       = local.ack_ecdsa_secret_name
+}
+
+output "storage_encryption_secret_name" {
+  description = "Secrets Manager name for the storage encryption key (empty when encryption is disabled)"
+  value       = local.storage_encryption_secret_name
+}
+
+output "dashboard_cursor_secret_name" {
+  description = "Secrets Manager name for the shared dashboard pagination cursor secret"
+  value       = local.dashboard_cursor_secret_name
 }
 
 output "deployment_stage" {
@@ -128,6 +182,21 @@ output "guardian_rate_limit_enabled" {
 output "guardian_rate_per_min" {
   description = "Effective Guardian HTTP sustained rate limit"
   value       = local.effective_guardian_rate_per_min
+}
+
+output "guardian_max_replicas" {
+  description = "Effective GUARDIAN_MAX_REPLICAS rate-limit divisor after clamping to the steady-state ECS capacity"
+  value       = local.effective_guardian_max_replicas
+}
+
+output "guardian_dashboard_commitment_rate_burst_per_sec" {
+  description = "Effective fleet-wide dashboard per-commitment burst rate limit"
+  value       = local.dashboard_rate_burst_per_sec
+}
+
+output "guardian_dashboard_commitment_rate_per_min" {
+  description = "Effective fleet-wide dashboard per-commitment sustained rate limit"
+  value       = local.dashboard_rate_per_min
 }
 
 output "guardian_db_pool_max_size" {

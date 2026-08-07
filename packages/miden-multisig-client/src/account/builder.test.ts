@@ -74,9 +74,6 @@ vi.mock('@miden-sdk/miden-sdk', () => ({
   AccountComponent: {
     compile: compileComponent,
   },
-  AccountType: {
-    RegularAccountUpdatableCode: 'regular',
-  },
   AccountStorageMode: {
     public: () => 'public',
     private: () => 'private',
@@ -108,11 +105,15 @@ describe('createMultisigAccount', () => {
       },
     };
 
-    await createMultisigAccount(webClient as never, {
-      threshold: 1,
-      signerCommitments: ['0x' + '1'.repeat(64)],
-      guardianCommitment: '0x' + '2'.repeat(64),
-    });
+    await createMultisigAccount(
+      webClient as never,
+      {
+        threshold: 1,
+        signerCommitments: ['0x' + '1'.repeat(64)],
+        guardianCommitment: '0x' + '2'.repeat(64),
+      },
+      'http://localhost:57291',
+    );
 
     expect(authBuilder.linkModule).toHaveBeenNthCalledWith(
       1,
@@ -142,12 +143,16 @@ describe('createMultisigAccount', () => {
       },
     };
 
-    await createMultisigAccount(webClient as never, {
-      threshold: 1,
-      signerCommitments: ['0x' + '1'.repeat(64)],
-      guardianCommitment: '0x' + '2'.repeat(64),
-      signatureScheme: 'ecdsa',
-    });
+    await createMultisigAccount(
+      webClient as never,
+      {
+        threshold: 1,
+        signerCommitments: ['0x' + '1'.repeat(64)],
+        guardianCommitment: '0x' + '2'.repeat(64),
+        signatureScheme: 'ecdsa',
+      },
+      'http://localhost:57291',
+    );
 
     expect(authBuilder.linkModule).toHaveBeenNthCalledWith(
       1,

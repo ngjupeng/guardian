@@ -18,13 +18,10 @@ import {
 import { compileTxScript } from '../raw-client.js';
 import { normalizeHexWord } from '../utils/encoding.js';
 import { randomWord } from '../utils/random.js';
-import type { SignatureOptions } from './options.js';
+import type { MidenClientSignatureOptions, SignatureOptions } from './options.js';
 import type { SignatureScheme } from '../types.js';
 
-function buildMultisigConfigAdvice(
-  threshold: number,
-  signerCommitments: string[],
-): { configHash: Word; payload: FeltArray } {
+function buildMultisigConfigFelts(threshold: number, signerCommitments: string[]): Felt[] {
   const numApprovers = signerCommitments.length;
   const felts: Felt[] = [
     new Felt(BigInt(threshold)),
@@ -36,8 +33,20 @@ function buildMultisigConfigAdvice(
     const word = WordType.fromHex(normalizeHexWord(commitment));
     felts.push(...word.toFelts());
   }
-  const payload = new FeltArray(felts);
-  const configHash = Poseidon2.hashElements(payload);
+  return felts;
+}
+
+function buildMultisigConfigAdvice(
+  threshold: number,
+  signerCommitments: string[],
+): { configHash: Word; payload: FeltArray } {
+  // `Poseidon2.hashElements` consumes (frees) its `FeltArray` by value, so the
+  // advice payload must be a freshly built one — reusing the hashed array
+  // surfaces as "null pointer passed to rust" at the later `advice.insert`.
+  const configHash = Poseidon2.hashElements(
+    new FeltArray(buildMultisigConfigFelts(threshold, signerCommitments)),
+  );
+  const payload = new FeltArray(buildMultisigConfigFelts(threshold, signerCommitments));
   return { configHash, payload };
 }
 
@@ -64,6 +73,18 @@ end
   );
 }
 
+export function buildUpdateSignersTransactionRequest(
+  client: MidenClient,
+  threshold: number,
+  signerCommitments: string[],
+  options: MidenClientSignatureOptions,
+): Promise<{ request: TransactionRequest; salt: Word; configHash: Word }>;
+export function buildUpdateSignersTransactionRequest(
+  client: WasmWebClient,
+  threshold: number,
+  signerCommitments: string[],
+  options?: SignatureOptions,
+): Promise<{ request: TransactionRequest; salt: Word; configHash: Word }>;
 export async function buildUpdateSignersTransactionRequest(
   client: MidenClient | WasmWebClient,
   threshold: number,

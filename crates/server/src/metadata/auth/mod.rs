@@ -9,6 +9,7 @@ use crate::error::GuardianError;
 use crate::metadata::MetadataStore;
 
 mod credentials;
+pub mod lookup;
 mod miden_ecdsa;
 mod miden_falcon_rpo;
 
@@ -17,12 +18,14 @@ pub use credentials::{AuthHeader, Credentials, ExtractCredentials, MAX_TIMESTAMP
 /// Authentication and authorization handler
 /// Defines which signature scheme to use and handles verification
 /// Each variant contains auth-specific authorization data
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum Auth {
     /// Miden Falcon RPO signature scheme
     MidenFalconRpo { cosigner_commitments: Vec<String> },
     /// Miden ECDSA secp256k1 signature scheme
     MidenEcdsa { cosigner_commitments: Vec<String> },
+    /// EVM ECDSA account signer snapshot
+    EvmEcdsa { signers: Vec<String> },
 }
 
 impl Auth {
@@ -30,6 +33,19 @@ impl Auth {
         match self {
             Auth::MidenFalconRpo { .. } => SignatureScheme::Falcon,
             Auth::MidenEcdsa { .. } => SignatureScheme::Ecdsa,
+            Auth::EvmEcdsa { .. } => SignatureScheme::Ecdsa,
+        }
+    }
+
+    /// Stable, dashboard-facing identifier for the auth method.
+    /// Surfaced on `GET /dashboard/info` under `accounts_by_auth_method`.
+    /// New variants MUST add a new label rather than reuse an existing
+    /// one so clients can keep historical counts comparable.
+    pub fn method_label(&self) -> &'static str {
+        match self {
+            Auth::MidenFalconRpo { .. } => "miden_falcon",
+            Auth::MidenEcdsa { .. } => "miden_ecdsa",
+            Auth::EvmEcdsa { .. } => "evm",
         }
     }
 
@@ -57,6 +73,7 @@ impl Auth {
                 let commitment = public_key.to_commitment();
                 Ok(format!("0x{}", hex::encode(commitment.to_bytes())))
             }
+            Auth::EvmEcdsa { .. } => crate::metadata::network::normalize_evm_address(pubkey_hex),
         }
     }
 
@@ -67,6 +84,9 @@ impl Auth {
             },
             Auth::MidenEcdsa { .. } => Auth::MidenEcdsa {
                 cosigner_commitments,
+            },
+            Auth::EvmEcdsa { .. } => Auth::EvmEcdsa {
+                signers: cosigner_commitments,
             },
         }
     }
@@ -124,6 +144,10 @@ impl Auth {
                     credentials.request_payload(),
                 )
             }
+            Auth::EvmEcdsa { .. } => {
+                let _ = credentials;
+                Err("EVM request auth requires network-aware verification".to_string())
+            }
         }
     }
 }
@@ -138,6 +162,13 @@ impl TryFrom<crate::api::grpc::guardian::AuthConfig> for Auth {
             }),
             Some(auth_config::AuthType::MidenEcdsa(miden_auth)) => Ok(Auth::MidenEcdsa {
                 cosigner_commitments: miden_auth.cosigner_commitments,
+            }),
+            Some(auth_config::AuthType::EvmEcdsa(evm_auth)) => Ok(Auth::EvmEcdsa {
+                signers: evm_auth
+                    .signers
+                    .into_iter()
+                    .map(|signer| crate::metadata::network::normalize_evm_address(&signer))
+                    .collect::<Result<Vec<_>, _>>()?,
             }),
             None => {
                 tracing::error!("Auth type not specified in AuthConfig");

@@ -86,6 +86,27 @@ describe('conversion', () => {
       }
     });
 
+    it('converts retained DeltaStatus with and without a reason (issue #345)', () => {
+      const withReason = fromServerDeltaStatus({
+        status: 'retained',
+        timestamp: '2026-07-23T00:00:00Z',
+        reason: 'diverged',
+      });
+      expect(withReason).toEqual({
+        status: 'retained',
+        timestamp: '2026-07-23T00:00:00Z',
+        reason: 'diverged',
+      });
+
+      // Serde omits the field for rows without a recorded reason.
+      const withoutReason = fromServerDeltaStatus({
+        status: 'retained',
+        timestamp: '2026-07-23T00:00:00Z',
+      });
+      expect(withoutReason.status).toBe('retained');
+      expect(withoutReason.reason).toBeUndefined();
+    });
+
     it('converts ProposalMetadata with all fields', () => {
       const server: ServerProposalMetadata = {
         proposal_type: 'update_procedure_threshold',
@@ -131,6 +152,26 @@ describe('conversion', () => {
       expect(result.proposalType).toBe('p2id');
       expect(result.description).toBe('send funds');
       expect(result.targetThreshold).toBeUndefined();
+    });
+
+    it('preserves an arbitrary custom proposal_type (issue #266)', () => {
+      const server: ServerProposalMetadata = {
+        proposal_type: 'b2agg',
+        description: 'agglayer bridge note',
+      };
+
+      const result = fromServerProposalMetadata(server);
+
+      expect(result.proposalType).toBe('b2agg');
+    });
+
+    it('preserves an arbitrary custom proposalType on the camelCase→server path (issue #266)', () => {
+      const result = toServerProposalMetadata({
+        proposalType: 'b2agg',
+        description: 'agglayer bridge note',
+      });
+
+      expect(result.proposal_type).toBe('b2agg');
     });
 
     it('converts DeltaObject', () => {
@@ -254,6 +295,22 @@ describe('conversion', () => {
           { signer_id: '0xsig1', signature: { scheme: 'falcon', signature: '0x1' }, timestamp: '2024-01-01T00:00:00Z' },
         ],
       });
+    });
+
+    it('round-trips retained DeltaStatus (issue #345)', () => {
+      const status: DeltaStatus = {
+        status: 'retained',
+        timestamp: '2026-07-23T00:00:00Z',
+        reason: 'retry_exhausted',
+      };
+
+      const server = toServerDeltaStatus(status);
+      expect(server).toEqual({
+        status: 'retained',
+        timestamp: '2026-07-23T00:00:00Z',
+        reason: 'retry_exhausted',
+      });
+      expect(fromServerDeltaStatus(server)).toEqual(status);
     });
 
     it('converts ProposalMetadata', () => {
@@ -395,6 +452,22 @@ describe('conversion', () => {
       expect(result.faucetId).toBe(original.faucetId);
       expect(result.amount).toBe(original.amount);
       expect(result.salt).toBe(original.salt);
+    });
+
+    it('p2id noteType survives roundtrip as note_type on the wire (issue #322)', () => {
+      const original: ProposalMetadata = {
+        proposalType: 'p2id',
+        recipientId: '0xrecipient',
+        faucetId: '0xfaucet',
+        amount: '1000',
+        noteType: 'private',
+      };
+
+      const server = toServerProposalMetadata(original);
+      expect(server.note_type).toBe('private');
+
+      const result = fromServerProposalMetadata(server);
+      expect(result.noteType).toBe('private');
     });
   });
 });

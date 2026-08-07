@@ -10,7 +10,9 @@ pub use builder::ProposalBuilder;
 pub use configuration::{
     build_update_procedure_threshold_transaction_request, build_update_signers_transaction_request,
 };
-pub use consume::build_consume_notes_transaction_request;
+pub use consume::{
+    build_consume_notes_transaction_request, build_consume_notes_transaction_request_from_notes,
+};
 pub use guardian::build_update_guardian_transaction_request;
 pub use payment::build_p2id_transaction_request;
 
@@ -21,6 +23,15 @@ use miden_protocol::{Felt, Word};
 
 use crate::MidenSdkClient;
 use crate::error::{MultisigError, Result};
+
+/// Deserializes a producer-supplied transaction request bytes (issue #266 producer
+/// API). The bytes are the serialized form of a Miden `TransactionRequest`.
+pub fn deserialize_transaction_request(bytes: &[u8]) -> Result<TransactionRequest> {
+    use miden_client::Deserializable;
+    TransactionRequest::read_from_bytes(bytes).map_err(|e| {
+        MultisigError::InvalidConfig(format!("failed to decode transaction request: {e}"))
+    })
+}
 
 /// Executes a transaction to get its summary (expects Unauthorized error).
 pub async fn execute_for_summary(
@@ -49,7 +60,7 @@ pub fn generate_salt() -> Word {
     for (i, chunk) in bytes.chunks(8).enumerate() {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(chunk);
-        felts[i] = Felt::new(u64::from_le_bytes(arr));
+        felts[i] = guardian_shared::felt::felt_from_u64_reduced(u64::from_le_bytes(arr));
     }
     felts.into()
 }
@@ -61,4 +72,49 @@ pub fn word_to_hex(word: &Word) -> String {
         .flat_map(|felt| felt.as_canonical_u64().to_le_bytes())
         .collect();
     format!("0x{}", hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_transaction_request_rejects_garbage_bytes() {
+        let err = deserialize_transaction_request(&[0xde, 0xad, 0xbe, 0xef])
+            .expect_err("garbage bytes must not deserialize");
+        assert!(
+            err.to_string()
+                .contains("failed to decode transaction request")
+        );
+    }
+
+    #[test]
+    fn deserialize_transaction_request_rejects_empty_bytes() {
+        let err =
+            deserialize_transaction_request(&[]).expect_err("empty bytes must not deserialize");
+        assert!(
+            err.to_string()
+                .contains("failed to decode transaction request")
+        );
+    }
+
+    /// Guards against silent transaction-kernel drift: the kernel commitment depends on transitive
+    /// hashing crates (notably Plonky3 `p3-*`), so a stale `Cargo.lock` yields a kernel the node
+    /// rejects with "value for key ... not present in the advice map". This constant must equal the
+    /// live network's "Proof Commitment"; if the test fails after a dependency bump, realign the
+    /// crates (`cargo update`) and update the constant together.
+    #[test]
+    fn transaction_kernel_commitment_matches_network() {
+        use miden_protocol::transaction::TransactionKernel;
+
+        const EXPECTED_KERNEL_COMMITMENT: &str =
+            "0x8cd42f3f2c023c2632ceb982f3d3cf2952f5a1655915c9525a04b510c53fbd20";
+
+        let actual = word_to_hex(&TransactionKernel.to_commitment());
+        assert_eq!(
+            actual, EXPECTED_KERNEL_COMMITMENT,
+            "transaction kernel commitment drifted from the network kernel; a transitive \
+             hashing crate (e.g. Plonky3 `p3-*`) likely changed in Cargo.lock"
+        );
+    }
 }

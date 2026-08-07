@@ -20,10 +20,15 @@
  * // Create a signer
  * const signer = new FalconSigner(secretKey);
  *
- * // Create multisig client
+ * // Create multisig client. Both endpoints are required; midenRpcEndpoint
+ * // must point at the same network as the injected MidenClient.
  * const client = new MultisigClient(midenClient, {
  *   guardianEndpoint: 'http://localhost:3000',
  *   midenRpcEndpoint: 'https://rpc.devnet.miden.io',
+ *   prover: {
+ *     url: 'https://prover.example',
+ *     retry: { maxAttempts: 4 },
+ *   },
  * });
  *
  * // Get GUARDIAN pubkey for config
@@ -39,7 +44,13 @@
  * ```
  */
 
-export { MultisigClient, type MultisigClientConfig } from './client.js';
+export {
+  MultisigClient,
+  type MultisigClientConfig,
+  type RecoveredAccount,
+} from './client.js';
+export type { ProverConfig, ProverRetryPolicy } from './prover/config.js';
+export { lookupAuthDigest } from './lookupAuth.js';
 export { Multisig, type AccountState } from './multisig.js';
 export { AccountInspector, type DetectedMultisigConfig, type VaultBalance } from './inspector.js';
 export {
@@ -49,9 +60,25 @@ export {
   buildUpdateGuardianTransactionRequest,
   buildConsumeNotesTransactionRequest,
   buildP2idTransactionRequest,
+  parseP2idNoteType,
+  p2idNoteTypeToMetadata,
+  type P2idTransactionOptions,
 } from './transaction.js';
 
 export { GuardianHttpClient, GuardianHttpError } from '@openzeppelin/guardian-client';
+export type { GuardianErrorMeta } from '@openzeppelin/guardian-client';
+// Typed error-code vocabulary (issue #318): branch on GuardianErrorCode,
+// never on message text; unknown wire codes surface via rawCode.
+export {
+  GUARDIAN_ERROR_CODES,
+  isGuardianErrorCode,
+  normalizeGuardianErrorCode,
+} from '@openzeppelin/guardian-client';
+export type { GuardianErrorCode } from '@openzeppelin/guardian-client';
+
+// Codeless transport-failure classification (feature 009, User Story 3).
+export { isLikelyNetworkError, toUserFacingError } from './connectivity.js';
+export type { ConnectivityCategory, UserFacingError } from './connectivity.js';
 
 export {
   FalconSigner,
@@ -73,6 +100,32 @@ export {
   storageLayoutBuilder,
   StorageLayoutBuilder,
 } from './account/index.js';
+
+export {
+  CONSUME_NOTES_METADATA_VERSION_V2,
+  MAX_CONSUME_NOTES_METADATA_BYTES,
+  isConsumeNotesV1,
+  isConsumeNotesV2,
+  isP2idNoteVisibility,
+  type P2idNoteVisibility,
+} from './types/proposal.js';
+
+export {
+  LEGACY_CONSUME_NOTES_ENABLED,
+} from './multisig/config.js';
+
+export {
+  type ConsumeNotesErrorCode,
+  NoteBindingMismatchError,
+  UnsupportedMetadataVersionError,
+  ConsumeNotesMetadataOversizeError,
+  LegacyConsumeNotesNoteMissingError,
+} from './multisig/consumeNotesErrors.js';
+
+export {
+  noteToBase64,
+  noteFromBase64,
+} from './utils/encoding.js';
 
 export {
   PROCEDURE_ROOTS,

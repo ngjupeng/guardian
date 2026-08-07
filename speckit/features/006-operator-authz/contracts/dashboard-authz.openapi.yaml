@@ -1,0 +1,157 @@
+openapi: 3.1.0
+info:
+  title: Guardian Dashboard Authorization Contract Addendum
+  version: "006-operator-authz"
+  description: >
+    Wire additions introduced by feature 006-operator-authz. Layers on top of
+    the existing dashboard surface defined by 002-operator-auth,
+    003-operator-account-apis, and 005-operator-dashboard-metrics. Two new
+    paths are introduced: GET /dashboard/session (session introspection,
+    always present) and POST /dashboard/_authz_probe (Cargo-feature-gated
+    middleware probe, default-off in release builds).
+
+servers:
+  - url: "{guardian_origin}"
+    variables:
+      guardian_origin:
+        default: "http://localhost:8080"
+
+paths:
+  /dashboard/session:
+    get:
+      operationId: getDashboardSession
+      summary: Return the authenticated operator's identity and effective permissions.
+      description: >
+        Session introspection. Requires a valid operator session but no specific
+        permission (FR-033, FR-034) — operators whose allowlist entry holds
+        `permissions: []` receive 200 with an empty array, not 403. Permissions
+        are re-resolved from the live allowlist on every call via the FR-008
+        path, so this endpoint reflects hot-reloaded grants and revocations
+        without requiring re-login. No `admin_actions` event is written for any
+        outcome (FR-035) — this is a read-only metadata endpoint.
+      security:
+        - dashboardSession: []
+      responses:
+        "200":
+          description: Authenticated; identity and effective permission set returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfoResponse"
+        "401":
+          description: Missing or invalid operator session (existing 002-operator-auth contract). No admin_actions event is written.
+
+  /dashboard/_authz_probe:
+    post:
+      operationId: probeAuthz
+      summary: Authorization-middleware probe (Cargo feature `authz-test-probe`, default-off).
+      description: >
+        Test-only endpoint. Declared required permission set: {accounts:pause}.
+        On success: writes one `admin_actions` row with action_kind = probe.access,
+        outcome = success, and returns 204. On insufficient permissions: returns
+        the 403 contract below and writes one `admin_actions` row with
+        action_kind = auth.denied. Returns 404 when the server is built without
+        the `authz-test-probe` Cargo feature.
+      security:
+        - dashboardSession: []
+      responses:
+        "204":
+          description: Probe succeeded.
+        "401":
+          description: Missing or invalid operator session (existing 002-operator-auth contract). No admin_actions event is written for 401.
+        "403":
+          description: Operator session is valid but lacks one or more required permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientOperatorPermissionResponse"
+        "404":
+          description: Server was built without the `authz-test-probe` Cargo feature.
+
+components:
+  securitySchemes:
+    dashboardSession:
+      type: apiKey
+      in: cookie
+      name: guardian_operator_session
+
+  schemas:
+    SessionInfoResponse:
+      description: >
+        Response shape for GET /dashboard/session. Carries the operator
+        identity from the authenticated principal and the effective
+        permission set as a lexicographically ordered string array
+        (FR-017 ordering rule, reused here for snapshot stability).
+      type: object
+      required:
+        - operator_id
+        - permissions
+      properties:
+        operator_id:
+          type: string
+          description: >
+            Operator identity from AuthenticatedOperator (today the commitment
+            hex per FR-023). Stable across permission changes.
+        permissions:
+          type: array
+          description: >
+            Effective permission set drawn live from the allowlist (FR-008),
+            sorted lexicographic ASCII. MAY be empty for entries with explicit
+            `permissions: []`.
+          items:
+            type: string
+            enum:
+              - "dashboard:read"
+              - "accounts:pause"
+              - "policies:write"
+      example:
+        operator_id: "0x094f..."
+        permissions: ["accounts:pause", "dashboard:read"]
+
+    InsufficientOperatorPermissionResponse:
+      description: >
+        Stable response shape for GUARDIAN_INSUFFICIENT_OPERATOR_PERMISSION.
+        Additive extension of the existing flat ErrorResponse envelope
+        (spec.md §Design decisions). The `code` field is the stable typed
+        discriminator; downstream consumers MUST key off `code`, not on the
+        HTTP status alone or on `error` message text.
+      type: object
+      required:
+        - success
+        - code
+        - error
+        - missing_permissions
+        - retryable
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        code:
+          type: string
+          enum: ["GUARDIAN_INSUFFICIENT_OPERATOR_PERMISSION"]
+        error:
+          type: string
+          description: Best-effort English message. Not part of the typed contract.
+        missing_permissions:
+          type: array
+          description: >
+            Required permissions the operator lacks, sorted lexicographic
+            ASCII (FR-017). MUST NOT be empty on a denial response (Edge
+            Case 16).
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - "dashboard:read"
+              - "accounts:pause"
+              - "policies:write"
+        retryable:
+          type: boolean
+          enum: [false]
+          description: A permission denial is never transient.
+      example:
+        success: false
+        code: "GUARDIAN_INSUFFICIENT_OPERATOR_PERMISSION"
+        error: "Operator lacks required permissions: accounts:pause"
+        missing_permissions: ["accounts:pause"]
+        retryable: false

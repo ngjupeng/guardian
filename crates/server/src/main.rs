@@ -4,11 +4,10 @@ use server::ack::AckRegistry;
 use server::builder::{ServerBuilder, storage::StorageMetadataBuilder};
 use server::canonicalization::CanonicalizationConfig;
 use server::logging::LoggingConfig;
-use server::middleware::{BodyLimitConfig, RateLimitConfig};
+use server::middleware::{BodyLimitConfig, CorsConfig, RateLimitConfig};
 use server::network::NetworkType;
 use std::env;
 use std::path::PathBuf;
-use tower_http::cors::{Any, CorsLayer};
 
 #[tokio::main]
 async fn main() {
@@ -18,7 +17,7 @@ async fn main() {
         .unwrap_or_else(|_| "/var/guardian/keystore".to_string())
         .into();
 
-    let (storage_backend, metadata) = StorageMetadataBuilder::from_env()
+    let (storage_backend, metadata, auditor, coordination) = StorageMetadataBuilder::from_env()
         .build()
         .await
         .expect("Failed to initialize storage backends");
@@ -28,23 +27,34 @@ async fn main() {
         .await
         .expect("Failed to initialize ack registry");
 
-    let cors_layer = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors_layer = CorsConfig::from_env()
+        .expect("Failed to initialize CORS config")
+        .layer();
 
-    let network_type = NetworkType::from_env_or("GUARDIAN_NETWORK_TYPE", NetworkType::MidenDevnet);
+    let network_type =
+        NetworkType::from_env("GUARDIAN_NETWORK_TYPE").expect("Failed to resolve network type");
 
     ServerBuilder::new()
         .with_logging(LoggingConfig::default())
         .network(network_type)
         .with_canonicalization(Some(
-            CanonicalizationConfig::new(10, 48).with_submission_grace_period_seconds(600),
+            CanonicalizationConfig::new(10, 48)
+                .with_submission_grace_period_seconds(600)
+                .with_fast_promotion_enabled_from_env()
+                .expect("Invalid fast promotion configuration")
+                .with_max_concurrent_accounts_from_env()
+                .expect("Invalid canonicalization concurrency configuration")
+                .with_retained_ttl_seconds_from_env()
+                .expect("Invalid retained TTL configuration")
+                .with_reconcile_interval_seconds_from_env()
+                .expect("Invalid reconcile interval configuration"),
         ))
         .with_rate_limit(RateLimitConfig::from_env())
         .with_body_limit(BodyLimitConfig::from_env())
         .storage(storage_backend)
         .metadata(metadata)
+        .auditor(auditor)
+        .coordination(coordination)
         .ack(ack)
         .http(true, 3000)
         .grpc(true, 50051)

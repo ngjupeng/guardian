@@ -37,11 +37,74 @@ let builder = ServerBuilder::new()
 
 Requests exceeding this limit receive a 413 Payload Too Large response.
 
+#### Feature-Gated EVM Support
+
+- `GUARDIAN_EVM_RPC_URLS` - Optional comma-separated EVM RPC map, formatted as `chain_id=url` entries, used when the server is built with `--features evm`
+- `GUARDIAN_EVM_ENTRYPOINT_ADDRESS` - Optional shared EVM EntryPoint address used for every configured EVM chain; defaults to the EntryPoint v0.9 address `0x433709009b8330fda32311df1c2afa402ed8d009`
+- `GUARDIAN_CORS_ALLOWED_ORIGINS` - Optional comma-separated explicit CORS origin allowlist; when set, CORS allows credentials for those origins
+
+#### Operator Dashboard
+
+- `GUARDIAN_OPERATOR_PUBLIC_KEYS_FILE` - Local JSON file containing serialized Falcon public keys allowed to authenticate as dashboard operators
+- `GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ID` - AWS Secrets Manager secret name or ARN containing the same JSON payload for deployed environments
+
+Each configured public key is parsed at the auth boundary and converted to its
+public key commitment. Operators still request challenges and verify sessions
+with the commitment derived from their key; the server derives the same
+commitment from the configured public key source when checking whether the
+operator is allowed.
+
+Because this format intentionally carries only keys, the dashboard session
+operator ID is the derived commitment.
+
+The JSON payload is a plain array of serialized Falcon public key hex strings:
+
+```json
+[
+  "0x<alice-falcon-public-key>",
+  "0x<bob-falcon-public-key>"
+]
+```
+
+Local example:
+
+```bash
+GUARDIAN_NETWORK_TYPE=MidenLocal \
+GUARDIAN_OPERATOR_PUBLIC_KEYS_FILE=/tmp/guardian-operator-public-keys.json \
+cargo run -p guardian-server --bin server
+```
+
+Deployed example:
+
+```bash
+GUARDIAN_NETWORK_TYPE=MidenTestnet \
+GUARDIAN_OPERATOR_PUBLIC_KEYS_SECRET_ID=arn:aws:secretsmanager:us-east-1:123456789012:secret:guardian/operators \
+cargo run -p guardian-server --bin server
+```
+
+When both source variables are set, the AWS secret takes precedence. File and
+secret sources are reread during operator auth checks, so adding or removing a
+public key takes effect without restarting the server as long as the configured
+file path or secret ID stays the same.
+
 ### Account Configuration
 
 Each account has:
 - `account_id` - Network-specific identifier
 - `auth` - Auth type with authorization data (e.g., cosigner public keys)
+- `network_config` - Network-specific runtime configuration. Miden is the default when omitted. EVM accounts use `evm:<chain_id>:<account_address>` account IDs and split identity `account_address` from `multisig_validator_address`.
+
+EVM support is feature-gated. Default builds do not register EVM routes or
+initialize EVM state, sessions, contract readers, or proposal handlers. Run
+with the `evm` feature for local EVM proposal coordination through
+`/evm/auth/*`, `/evm/accounts`, and `/evm/proposals*`:
+
+```bash
+GUARDIAN_NETWORK_TYPE=MidenTestnet \
+GUARDIAN_EVM_RPC_URLS=31337=http://127.0.0.1:8545 \
+GUARDIAN_EVM_ENTRYPOINT_ADDRESS=0x433709009b8330fda32311df1c2afa402ed8d009 \
+cargo run -p guardian-server --features evm --bin server
+```
 
 ### Storage Backends
 
@@ -89,10 +152,14 @@ GUARDIAN_ENV=prod
 AWS_REGION=us-east-1
 ```
 
-On startup, the server fetches these two fixed Secrets Manager entries once, imports them into `GUARDIAN_KEYSTORE_PATH`, and then uses the normal filesystem keystore for signing:
+On startup, the server fetches two Secrets Manager entries once, imports them into `GUARDIAN_KEYSTORE_PATH`, and then uses the normal filesystem keystore for signing. The secret names are read from:
 
-- `guardian-prod/server/ack-falcon-secret-key`
-- `guardian-prod/server/ack-ecdsa-secret-key`
+- `GUARDIAN_ACK_FALCON_SECRET_ID`
+- `GUARDIAN_ACK_ECDSA_SECRET_ID`
+
+The ECS task definition always injects these from Terraform. Terraform defaults them to `${stack_name}/server/ack-{falcon,ecdsa}-secret-key`, so different stacks naturally get distinct secret names and multiple Guardian instances can coexist in the same AWS account. Override the names explicitly via the `guardian_ack_{falcon,ecdsa}_secret_name` Terraform variables when a stack needs to point at a pre-existing legacy secret.
+
+If you run the server outside ECS with `GUARDIAN_ENV=prod`, set both env vars yourself.
 
 Local and `dev` deployments stay on the filesystem-only path.
 
@@ -206,15 +273,20 @@ ServerBuilder::new()
 #### HTTP REST API (Port 3000)
 
 - **POST** `/configure` - Configure a new account with initial state
-- **POST** `/delta` - Submit a new delta for an account
+- **POST** `/delta` - Submit a new Miden delta for an account
 - **GET** `/delta?account_id=<id>&nonce=<n>` - Retrieve a specific delta by account ID and nonce
-- **GET** `/head?account_id=<id>` - Get the latest delta (highest nonce) for an account
 - **GET** `/state?account_id=<id>` - Retrieve the current state of an account
 - **GET** `/delta/since?account_id=<id>&nonce=<n>` - Retrieve the delta since a given nonce
 - **POST** `/delta/proposal` - Create a delta proposal for multi-party signing
-- **POST** `/delta/proposal/sign` - Add a signature to an existing delta proposal
+- **PUT** `/delta/proposal` - Add a signature to an existing delta proposal
 - **GET** `/delta/proposal?account_id=<id>` - List pending delta proposals for an account
 - **GET** `/delta/proposal/single?account_id=<id>&commitment=<c>` - Retrieve a pending proposal by commitment
+- **GET** `/pubkey?scheme=<falcon|ecdsa>` - Get the acknowledgement key commitment and optional raw public key
+- **GET** `/auth/challenge?commitment=<commitment>` - Issue an operator dashboard login challenge
+- **POST** `/auth/verify` - Verify an operator dashboard signature and set a session cookie
+- **POST** `/auth/logout` - Clear the operator dashboard session cookie and invalidate the server-side session
+- **GET** `/dashboard/accounts` - List dashboard account summaries for an authenticated operator session
+- **GET** `/dashboard/accounts/{account_id}` - Fetch one dashboard account detail record for an authenticated operator session
 
 #### gRPC API (Port 50051)
 
@@ -222,9 +294,9 @@ All methods are available through the `guardian.Guardian` service:
 - `Configure(ConfigureRequest) -> ConfigureResponse`
 - `PushDelta(PushDeltaRequest) -> PushDeltaResponse`
 - `GetDelta(GetDeltaRequest) -> GetDeltaResponse`
-- `GetDeltaHead(GetDeltaHeadRequest) -> GetDeltaHeadResponse`
 - `GetState(GetStateRequest) -> GetStateResponse`
 - `GetDeltaSince(GetDeltaSinceRequest) -> GetDeltaSinceResponse`
+- `GetPubkey(GetPubkeyRequest) -> GetPubkeyResponse`
 - `PushDeltaProposal(PushDeltaProposalRequest) -> PushDeltaProposalResponse`
 - `SignDeltaProposal(SignDeltaProposalRequest) -> SignDeltaProposalResponse`
 - `GetDeltaProposals(GetDeltaProposalsRequest) -> GetDeltaProposalsResponse`

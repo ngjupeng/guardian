@@ -1,3 +1,12 @@
+//! ACK signing: Guardian's own response signers over delta commitments.
+//!
+//! [`AckRegistry`] holds both schemes — Falcon and ECDSA — and signs a delta
+//! with the scheme the request selects. The ECDSA signer is abstracted over a
+//! pluggable backend so its key can live in a hosted service; Falcon stays
+//! concrete. The two are built independently at startup: a hosted ECDSA backend
+//! must not require an ECDSA secret in Secrets Manager that does not exist.
+
+mod file_provider;
 pub mod miden_ecdsa;
 pub mod miden_falcon_rpo;
 mod secrets_manager;
@@ -5,18 +14,29 @@ mod secrets_manager;
 use crate::delta_object::DeltaObject;
 use crate::error::{GuardianError, Result};
 use guardian_shared::SignatureScheme;
-use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
-use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey as FalconSecretKey;
-use std::path::PathBuf;
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SigningKey as EcdsaSecretKey;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use self::file_provider::FileSecretProvider;
 use self::secrets_manager::{AckSecretProvider, AwsSecretsManagerProvider};
 
-pub use miden_ecdsa::MidenEcdsaSigner;
+pub(crate) use miden_ecdsa::{
+    AwsKmsEcdsaBackend, EcdsaBackendKind, EcdsaSignerBackend, InMemoryEcdsaBackend,
+    MidenEcdsaSigner,
+};
 pub use miden_falcon_rpo::MidenFalconRpoSigner;
 
 const ENV_GUARDIAN_ENV: &str = "GUARDIAN_ENV";
 const PROD_ENV: &str = "prod";
+const ENV_ACK_SECRET_PROVIDER: &str = "GUARDIAN_ACK_SECRET_PROVIDER";
+const PROVIDER_AWS: &str = "aws";
+const PROVIDER_FILE: &str = "file";
+const PROVIDER_NONE: &str = "none";
 
+/// The ECDSA signer is abstracted over [`EcdsaSignerBackend`] so its key can live
+/// in a hosted backend (e.g. AWS KMS); Falcon stays concrete because hosted
+/// backends only support the secp256k1 ECDSA scheme.
 #[derive(Clone)]
 pub struct AckRegistry {
     falcon: MidenFalconRpoSigner,
@@ -25,12 +45,9 @@ pub struct AckRegistry {
 
 impl AckRegistry {
     pub async fn new(keystore_path: PathBuf) -> Result<Self> {
-        if is_prod_environment()? {
-            let provider = AwsSecretsManagerProvider::from_env().await?;
-            Self::from_secret_provider(keystore_path, &provider).await
-        } else {
-            Self::new_filesystem(keystore_path)
-        }
+        let ecdsa_backend = EcdsaBackendKind::from_env()?;
+        let provider = AckSecretProviderKind::from_env()?.build().await?;
+        Self::from_provider(keystore_path, ecdsa_backend, provider.as_deref()).await
     }
 
     pub fn pubkey(&self, scheme: &SignatureScheme) -> String {
@@ -47,64 +64,161 @@ impl AckRegistry {
         }
     }
 
-    pub fn ack_delta(&self, delta: DeltaObject, scheme: &SignatureScheme) -> Result<DeltaObject> {
+    pub(crate) fn ecdsa_backend_id(&self) -> &'static str {
+        self.ecdsa.backend_id()
+    }
+
+    pub async fn ack_delta(
+        &self,
+        delta: DeltaObject,
+        scheme: &SignatureScheme,
+    ) -> Result<DeltaObject> {
         match scheme {
             SignatureScheme::Falcon => Ok(self.falcon.ack_delta(delta)?),
-            SignatureScheme::Ecdsa => Ok(self.ecdsa.ack_delta(delta)?),
+            SignatureScheme::Ecdsa => self.ecdsa.ack_delta(delta).await,
         }
     }
 
-    fn new_filesystem(keystore_path: PathBuf) -> Result<Self> {
-        let falcon = MidenFalconRpoSigner::new(keystore_path.clone(), None)?;
-        let ecdsa = MidenEcdsaSigner::new(keystore_path, None)?;
-        Ok(Self { falcon, ecdsa })
-    }
-
-    async fn from_secret_provider<P: AckSecretProvider>(
+    async fn from_provider<P: AckSecretProvider + ?Sized>(
         keystore_path: PathBuf,
-        provider: &P,
+        ecdsa_backend: EcdsaBackendKind,
+        provider: Option<&P>,
     ) -> Result<Self> {
-        let falcon_secret = provider.falcon_secret_key().await?;
-        let ecdsa_secret = provider.ecdsa_secret_key().await?;
-
-        Self::from_secret_keys(keystore_path, &falcon_secret, &ecdsa_secret)
-    }
-
-    fn from_secret_keys(
-        keystore_path: PathBuf,
-        falcon_secret: &FalconSecretKey,
-        ecdsa_secret: &EcdsaSecretKey,
-    ) -> Result<Self> {
-        let falcon = MidenFalconRpoSigner::new(keystore_path.clone(), Some(falcon_secret))?;
-        let ecdsa = MidenEcdsaSigner::new(keystore_path, Some(ecdsa_secret))?;
+        let falcon = build_falcon_signer(&keystore_path, provider).await?;
+        let ecdsa = build_ecdsa_signer(keystore_path, ecdsa_backend, provider).await?;
         Ok(Self { falcon, ecdsa })
     }
 }
 
-fn is_prod_environment() -> Result<bool> {
-    match std::env::var(ENV_GUARDIAN_ENV) {
-        Ok(value) => Ok(value.eq_ignore_ascii_case(PROD_ENV)),
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(std::env::VarError::NotUnicode(_)) => Err(GuardianError::ConfigurationError(format!(
-            "{ENV_GUARDIAN_ENV} must contain valid UTF-8"
-        ))),
+async fn build_falcon_signer<P: AckSecretProvider + ?Sized>(
+    keystore_path: &Path,
+    provider: Option<&P>,
+) -> Result<MidenFalconRpoSigner> {
+    let secret = match provider {
+        Some(provider) => Some(provider.falcon_secret_key().await?),
+        None => None,
+    };
+    Ok(MidenFalconRpoSigner::new(
+        keystore_path.to_path_buf(),
+        secret.as_ref(),
+    )?)
+}
+
+async fn acquire_ecdsa_secret<P: AckSecretProvider + ?Sized>(
+    ecdsa_backend: EcdsaBackendKind,
+    provider: Option<&P>,
+) -> Result<Option<EcdsaSecretKey>> {
+    match (ecdsa_backend, provider) {
+        (EcdsaBackendKind::InMemory, Some(provider)) => {
+            Ok(Some(provider.ecdsa_secret_key().await?))
+        }
+        _ => Ok(None),
     }
 }
 
-#[cfg(test)]
+async fn build_ecdsa_signer<P: AckSecretProvider + ?Sized>(
+    keystore_path: PathBuf,
+    ecdsa_backend: EcdsaBackendKind,
+    provider: Option<&P>,
+) -> Result<MidenEcdsaSigner> {
+    let backend: Arc<dyn EcdsaSignerBackend> = match ecdsa_backend {
+        EcdsaBackendKind::InMemory => {
+            let secret = acquire_ecdsa_secret(ecdsa_backend, provider).await?;
+            Arc::new(InMemoryEcdsaBackend::new(keystore_path, secret.as_ref())?)
+        }
+        EcdsaBackendKind::AwsKms => Arc::new(AwsKmsEcdsaBackend::connect_from_env().await?),
+    };
+    tracing::info!(backend = backend.backend_id(), "ECDSA ACK signer ready");
+    Ok(MidenEcdsaSigner::new(backend))
+}
+
+/// Selects where the ACK signing secrets come from at startup, and thus whether
+/// Guardian keeps a stable identity. [`Aws`](Self::Aws) and [`File`](Self::File)
+/// both supply fixed key material; [`None`](Self::None) generates an ephemeral
+/// keypair on every boot, so the on-chain ack-key commitment changes each
+/// restart and freezes any account that pinned the previous one. Selected by
+/// `GUARDIAN_ACK_SECRET_PROVIDER`; when unset it defaults to AWS in prod and
+/// ephemeral elsewhere, preserving the historical behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AckSecretProviderKind {
+    Aws,
+    File,
+    None,
+}
+
+impl AckSecretProviderKind {
+    fn from_env() -> Result<Self> {
+        let raw = match std::env::var(ENV_ACK_SECRET_PROVIDER) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(GuardianError::ConfigurationError(format!(
+                    "{ENV_ACK_SECRET_PROVIDER} must contain valid UTF-8"
+                )));
+            }
+        };
+        Self::resolve(raw.as_deref(), crate::config::stage::is_prod()?)
+    }
+
+    /// Pure resolution of the provider kind, split out from [`from_env`] so it is
+    /// testable without mutating process-global env vars (which `AckRegistry::new`
+    /// reads concurrently). `raw` is the `GUARDIAN_ACK_SECRET_PROVIDER` value
+    /// (`None` when unset); `is_prod` is whether `GUARDIAN_ENV=prod`. Unset or
+    /// blank falls back to the backward-compatible default — AWS in prod,
+    /// ephemeral elsewhere — while an explicit value wins, except `none` is
+    /// refused in prod so a stable-identity deployment can't boot ephemeral.
+    fn resolve(raw: Option<&str>, is_prod: bool) -> Result<Self> {
+        let default = if is_prod { Self::Aws } else { Self::None };
+        match raw.map(|value| value.trim().to_ascii_lowercase()) {
+            None => Ok(default),
+            Some(value) => match value.as_str() {
+                "" => Ok(default),
+                PROVIDER_AWS => Ok(Self::Aws),
+                PROVIDER_FILE => Ok(Self::File),
+                // Explicit `none` in prod would boot ephemeral keys and silently
+                // invalidate every account that pinned the on-chain commitment;
+                // refuse it rather than start with a throwaway identity.
+                PROVIDER_NONE if is_prod => Err(GuardianError::ConfigurationError(format!(
+                    "{ENV_ACK_SECRET_PROVIDER}=`{PROVIDER_NONE}` is not allowed when {ENV_GUARDIAN_ENV}=`{PROD_ENV}`"
+                ))),
+                PROVIDER_NONE => Ok(Self::None),
+                other => Err(GuardianError::ConfigurationError(format!(
+                    "{ENV_ACK_SECRET_PROVIDER} `{other}` is not supported (expected `{PROVIDER_AWS}`, `{PROVIDER_FILE}`, or `{PROVIDER_NONE}`)"
+                ))),
+            },
+        }
+    }
+
+    /// Constructs the selected provider. `None` means no provider — the signers
+    /// fall back to ephemeral keys generated in the keystore.
+    async fn build(self) -> Result<Option<Box<dyn AckSecretProvider>>> {
+        match self {
+            Self::Aws => Ok(Some(Box::new(AwsSecretsManagerProvider::from_env().await?))),
+            Self::File => Ok(Some(Box::new(FileSecretProvider::from_env()?))),
+            Self::None => Ok(None),
+        }
+    }
+}
+
+#[cfg(all(test, not(any(feature = "integration", feature = "e2e"))))]
 mod tests {
     use super::*;
+    use crate::error::GuardianError;
     use async_trait::async_trait;
     use miden_keystore::{EcdsaKeyStore, FilesystemEcdsaKeyStore, FilesystemKeyStore, KeyStore};
+    use miden_protocol::crypto::dsa::falcon512_poseidon2::SecretKey as FalconSecretKey;
     use miden_protocol::utils::serde::Serializable;
     use rand_chacha::ChaCha20Rng;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct MockAckSecretProvider {
+    struct CountingProvider {
         falcon_secret: Option<FalconSecretKey>,
         ecdsa_secret: Option<EcdsaSecretKey>,
+        falcon_calls: Arc<AtomicUsize>,
+        ecdsa_calls: Arc<AtomicUsize>,
     }
 
-    impl MockAckSecretProvider {
+    impl CountingProvider {
         fn new(
             falcon_secret: Option<FalconSecretKey>,
             ecdsa_secret: Option<EcdsaSecretKey>,
@@ -112,44 +226,50 @@ mod tests {
             Self {
                 falcon_secret,
                 ecdsa_secret,
+                falcon_calls: Arc::new(AtomicUsize::new(0)),
+                ecdsa_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
 
     #[async_trait]
-    impl AckSecretProvider for MockAckSecretProvider {
+    impl AckSecretProvider for CountingProvider {
         async fn falcon_secret_key(&self) -> Result<FalconSecretKey> {
+            self.falcon_calls.fetch_add(1, Ordering::SeqCst);
             self.falcon_secret.clone().ok_or_else(|| {
-                GuardianError::ConfigurationError(
-                    "Secret guardian-prod/server/ack-falcon-secret-key not found".to_string(),
-                )
+                GuardianError::ConfigurationError("falcon ack secret not found".to_string())
             })
         }
 
         async fn ecdsa_secret_key(&self) -> Result<EcdsaSecretKey> {
+            self.ecdsa_calls.fetch_add(1, Ordering::SeqCst);
             self.ecdsa_secret.clone().ok_or_else(|| {
-                GuardianError::ConfigurationError(
-                    "Secret guardian-prod/server/ack-ecdsa-secret-key not found".to_string(),
-                )
+                GuardianError::ConfigurationError("ecdsa ack secret not found".to_string())
             })
         }
     }
 
-    #[tokio::test]
-    async fn aws_secretsmanager_backend_imports_keys_into_filesystem_keystore() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "guardian_ack_registry_test_{}",
+    fn temp_keystore(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "guardian_ack_registry_{tag}_{}",
             uuid::Uuid::new_v4()
         ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn in_memory_backend_imports_keys_into_filesystem_keystore() {
+        let dir = temp_keystore("import");
         let falcon_secret = FalconSecretKey::new();
         let ecdsa_secret = EcdsaSecretKey::new();
         let provider =
-            MockAckSecretProvider::new(Some(falcon_secret.clone()), Some(ecdsa_secret.clone()));
+            CountingProvider::new(Some(falcon_secret.clone()), Some(ecdsa_secret.clone()));
 
-        let registry = AckRegistry::from_secret_provider(temp_dir.clone(), &provider)
-            .await
-            .unwrap();
+        let registry =
+            AckRegistry::from_provider(dir.clone(), EcdsaBackendKind::InMemory, Some(&provider))
+                .await
+                .unwrap();
 
         assert_eq!(
             registry.commitment(&SignatureScheme::Falcon),
@@ -166,9 +286,8 @@ mod tests {
             )
         );
 
-        let falcon_keystore = FilesystemKeyStore::<ChaCha20Rng>::new(temp_dir.clone()).unwrap();
-        let ecdsa_keystore = FilesystemEcdsaKeyStore::new(temp_dir.clone()).unwrap();
-
+        let falcon_keystore = FilesystemKeyStore::<ChaCha20Rng>::new(dir.clone()).unwrap();
+        let ecdsa_keystore = FilesystemEcdsaKeyStore::new(dir.clone()).unwrap();
         assert_eq!(
             falcon_keystore
                 .get_key(falcon_secret.public_key().to_commitment())
@@ -183,24 +302,130 @@ mod tests {
                 .to_bytes(),
             ecdsa_secret.to_bytes()
         );
-        std::fs::remove_dir_all(temp_dir).ok();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]
-    async fn aws_secretsmanager_backend_requires_both_secret_values() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "guardian_ack_registry_test_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let falcon_secret = FalconSecretKey::new();
-        let provider = MockAckSecretProvider::new(Some(falcon_secret), None);
+    async fn in_memory_backend_requires_ecdsa_secret() {
+        let dir = temp_keystore("require");
+        let provider = CountingProvider::new(Some(FalconSecretKey::new()), None);
 
-        let result = AckRegistry::from_secret_provider(temp_dir.clone(), &provider).await;
+        let result =
+            AckRegistry::from_provider(dir.clone(), EcdsaBackendKind::InMemory, Some(&provider))
+                .await;
 
         assert!(
-            matches!(result, Err(GuardianError::ConfigurationError(message)) if message.contains("ack-ecdsa-secret-key"))
+            matches!(result, Err(GuardianError::ConfigurationError(message)) if message.contains("ecdsa"))
         );
-        std::fs::remove_dir_all(temp_dir).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn aws_kms_backend_skips_ecdsa_secret_fetch() {
+        let provider =
+            CountingProvider::new(Some(FalconSecretKey::new()), Some(EcdsaSecretKey::new()));
+
+        let secret = acquire_ecdsa_secret(EcdsaBackendKind::AwsKms, Some(&provider))
+            .await
+            .unwrap();
+
+        assert!(secret.is_none());
+        assert_eq!(provider.ecdsa_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn in_memory_backend_fetches_ecdsa_secret() {
+        let provider =
+            CountingProvider::new(Some(FalconSecretKey::new()), Some(EcdsaSecretKey::new()));
+
+        let secret = acquire_ecdsa_secret(EcdsaBackendKind::InMemory, Some(&provider))
+            .await
+            .unwrap();
+
+        assert!(secret.is_some());
+        assert_eq!(provider.ecdsa_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn falcon_secret_is_fetched_regardless_of_ecdsa_backend() {
+        let dir = temp_keystore("falcon");
+        let provider =
+            CountingProvider::new(Some(FalconSecretKey::new()), Some(EcdsaSecretKey::new()));
+
+        build_falcon_signer(&dir, Some(&provider)).await.unwrap();
+
+        assert_eq!(provider.falcon_calls.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // `AckSecretProviderKind::resolve` is the pure core of provider selection;
+    // it is tested directly so these cases never mutate the process-global env
+    // vars that `AckRegistry::new` reads concurrently in other tests.
+    #[test]
+    fn provider_kind_unset_defaults_to_none_outside_prod() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(None, false).unwrap(),
+            AckSecretProviderKind::None
+        );
+    }
+
+    #[test]
+    fn provider_kind_unset_defaults_to_aws_in_prod() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(None, true).unwrap(),
+            AckSecretProviderKind::Aws
+        );
+    }
+
+    #[test]
+    fn provider_kind_blank_falls_back_to_default() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(Some("   "), true).unwrap(),
+            AckSecretProviderKind::Aws
+        );
+        assert_eq!(
+            AckSecretProviderKind::resolve(Some(""), false).unwrap(),
+            AckSecretProviderKind::None
+        );
+    }
+
+    #[test]
+    fn provider_kind_explicit_file_overrides_prod_default() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(Some("FILE"), true).unwrap(),
+            AckSecretProviderKind::File
+        );
+    }
+
+    #[test]
+    fn provider_kind_rejects_explicit_none_in_prod() {
+        let error = AckSecretProviderKind::resolve(Some("none"), true).unwrap_err();
+        assert!(
+            matches!(error, GuardianError::ConfigurationError(message) if message.contains("not allowed"))
+        );
+    }
+
+    #[test]
+    fn provider_kind_explicit_none_allowed_outside_prod() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(Some("none"), false).unwrap(),
+            AckSecretProviderKind::None
+        );
+    }
+
+    #[test]
+    fn provider_kind_explicit_aws_selected_outside_prod() {
+        assert_eq!(
+            AckSecretProviderKind::resolve(Some("aws"), false).unwrap(),
+            AckSecretProviderKind::Aws
+        );
+    }
+
+    #[test]
+    fn provider_kind_rejects_unknown_value() {
+        let error = AckSecretProviderKind::resolve(Some("vault"), false).unwrap_err();
+        assert!(
+            matches!(error, GuardianError::ConfigurationError(message) if message.contains("vault"))
+        );
     }
 }

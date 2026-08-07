@@ -4,12 +4,33 @@
 [![CLA Assistant](https://github.com/OpenZeppelin/guardian/actions/workflows/cla.yml/badge.svg)](https://github.com/OpenZeppelin/guardian/actions/workflows/cla.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OpenZeppelin/guardian/badge)](https://api.securityscorecards.dev/projects/github.com/OpenZeppelin/guardian)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11427/badge)](https://www.bestpractices.dev/projects/11427)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/OpenZeppelin/guardian)
 
 Warning: This is a work in progress.
 
-### Specification
+### Documentation
 
-See the [Specification](spec/index.md) for an overview of the system design. It describes core concepts (State and Delta), components (API, Metadata, Auth, Acknowledger, Network, Storage), and key processes such as canonicalization. If you’re integrating or extending the system, start there to understand invariants, defaults, and extension points.
+- [`docs/`](docs/README.md) — in-repo documentation hub. Start with
+  [Concepts](docs/CONCEPTS.md) for the custody model and state/delta
+  lifecycle, then [Quickstart](docs/QUICKSTART.md) (60-second hello)
+  or [Local development](docs/LOCAL_DEV.md) (depth). Also covers
+  [Production](docs/PRODUCTION.md) (supported production shape),
+  [Configuration](docs/CONFIGURATION.md) (every env var),
+  [Troubleshooting](docs/TROUBLESHOOTING.md), architecture (services
+  and AWS deployment), the operator dashboard, the secrets runbook, and
+  the multisig SDK guide.
+- [`spec/`](spec/index.md) — protocol specification. Core concepts
+  (State and Delta), components (API, Metadata, Auth, Acknowledger,
+  Network, Storage), and key processes such as canonicalization. Start
+  here to understand invariants, defaults, and extension points.
+
+### Contributing
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — picking work, branching, commit
+  style, cross-layer change rules, testing, docs, CLA.
+- [`AGENTS.md`](AGENTS.md) — operational guide and the mandatory
+  contract-change workflow for changes touching the wire contract.
+- [`SECURITY.md`](SECURITY.md) — private vulnerability disclosure.
 
 ### Project Structure
 
@@ -25,6 +46,8 @@ See the [Specification](spec/index.md) for an overview of the system design. It 
 #### TypeScript Packages
 
 - **[packages/guardian-client](packages/guardian-client/README.md)** - TypeScript HTTP client for GUARDIAN server
+- **[packages/guardian-evm-client](packages/guardian-evm-client/README.md)** - TypeScript EVM client for GUARDIAN proposal workflows
+- **[packages/guardian-operator-client](packages/guardian-operator-client/README.md)** - Lean TypeScript HTTP client for operator dashboard auth and account APIs
 - **[packages/miden-multisig-client](packages/miden-multisig-client/README.md)** - TypeScript SDK for Miden multisig accounts with GUARDIAN integration
 
 ### Quick Start
@@ -50,38 +73,54 @@ For env-driven benchmark network/canonicalization settings, apply the runtime co
 - `GUARDIAN_RATE_PER_MIN` - Maximum requests per minute (default: `60`)
 - `GUARDIAN_MAX_REQUEST_BYTES` - Maximum request body size in bytes (default: `1048576` = 1 MB)
 - `GUARDIAN_MAX_PENDING_PROPOSALS_PER_ACCOUNT` - Maximum pending delta proposals per account (default: `20`)
+- `GUARDIAN_EVM_RPC_URLS` - Comma-separated `chain_id=rpc_url` map for EVM proposal support
+- `GUARDIAN_EVM_ENTRYPOINT_ADDRESS` - Shared EntryPoint address used for EVM proposal finality checks (single address across chains; defaults to EntryPoint v0.9 `0x433709009b8330fda32311df1c2afa402ed8d009`)
 
 ### Running
 
 #### Running with Cargo
 
 ```bash
-cargo run --bin server
+GUARDIAN_NETWORK_TYPE=MidenTestnet cargo run --bin server
+```
+
+`GUARDIAN_NETWORK_TYPE` (`MidenLocal`, `MidenTestnet`, or `MidenDevnet`) is
+required — the server refuses to start without it. A root `.env` file works
+too; see [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md#environment-file).
+
+EVM proposal support is feature-gated. Default builds do not register EVM
+routes. EVM-enabled servers use the domain-separated `/evm/auth/*`,
+`/evm/accounts`, and `/evm/proposals*` routes.
+
+```bash
+GUARDIAN_NETWORK_TYPE=MidenTestnet \
+GUARDIAN_EVM_RPC_URLS=31337=http://127.0.0.1:8545 \
+GUARDIAN_EVM_ENTRYPOINT_ADDRESS=0x... \
+cargo run -p guardian-server --features evm --bin server
 ```
 
 #### Running with Docker Compose
 
-1. Copy `.env.example` to `.env`
+The default compose file sets the container paths it needs, but you must
+choose a network explicitly: `GUARDIAN_NETWORK_TYPE` has no default and the
+server refuses to start without it. Set it in a root `.env` or export it in
+your shell before starting:
 
 ```bash
-cp .env.example .env
-```
-
-2. Edit `.env` with your configuration
-
-3. Start the server:
-
-```bash
+echo "GUARDIAN_NETWORK_TYPE=MidenTestnet" > .env
 docker compose up --build -d
 ```
 
-4. View logs:
+For direct `cargo run` development, create a local `.env` as described in
+[`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md#environment-file).
+
+View logs:
 
 ```bash
 docker compose logs -f
 ```
 
-5. Stop services:
+Stop services:
 
 ```bash
 docker compose down
@@ -91,7 +130,11 @@ The HTTP server will be available at `http://localhost:3000`
 
 The gRPC server will be available at `localhost:50051`
 
-This default Compose flow uses the filesystem backend. If you need a local Postgres container for benchmark or explicit Postgres-backed runs, use [docker-compose.postgres.yml](/Users/marcos/repos/guardian/docker-compose.postgres.yml) instead.
+This default Compose flow uses the filesystem backend. If you need a local Postgres container for benchmark or explicit Postgres-backed runs, set `POSTGRES_PASSWORD` in `.env` and run with the [Postgres override](./docker-compose.postgres.yml):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build -d
+```
 
 ### Testing
 
@@ -118,9 +161,13 @@ cargo test -p guardian-server --features e2e
 ```bash
 # Install dependencies
 cd packages/guardian-client && npm install
+cd packages/guardian-evm-client && npm install
+cd packages/guardian-operator-client && npm install
 cd packages/miden-multisig-client && npm install
 
 # Run tests
 cd packages/guardian-client && npm test
+cd packages/guardian-evm-client && npm test
+cd packages/guardian-operator-client && npm test
 cd packages/miden-multisig-client && npm test
 ```

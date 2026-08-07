@@ -1,6 +1,7 @@
 import type { ProposalMetadata as GuardianProposalMetadata } from '@openzeppelin/guardian-client';
 import type { ProposalMetadata } from '../types.js';
 import { isProcedureName } from '../procedures.js';
+import { isP2idNoteVisibility } from '../types/proposal.js';
 
 export class ProposalMetadataCodec {
   static toGuardian(metadata: ProposalMetadata): GuardianProposalMetadata {
@@ -16,6 +17,8 @@ export class ProposalMetadataCodec {
         return {
           ...base,
           noteIds: metadata.noteIds,
+          consumeNotesMetadataVersion: metadata.metadataVersion,
+          consumeNotesNotes: metadata.notes,
         };
       case 'p2id':
         return {
@@ -23,6 +26,10 @@ export class ProposalMetadataCodec {
           recipientId: metadata.recipientId,
           faucetId: metadata.faucetId,
           amount: metadata.amount,
+          // Canonicalize: emit note_type only when private, so a public note
+          // keeps the pre-#322 wire shape and matches the Rust encoder (which
+          // round-trips through the NoteType enum). Absent => public.
+          noteType: metadata.noteType === 'private' ? 'private' : undefined,
         };
       case 'switch_guardian':
         return {
@@ -46,8 +53,9 @@ export class ProposalMetadataCodec {
           targetThreshold: metadata.targetThreshold,
           signerCommitments: metadata.targetSignerCommitments,
         };
-      case 'unknown':
-        return base;
+      case 'custom':
+        // Round-trip the original server label rather than the 'custom' bucket.
+        return { ...base, proposalType: metadata.rawProposalType };
     }
   }
 
@@ -67,12 +75,18 @@ export class ProposalMetadataCodec {
         if (!guardian.recipientId || !guardian.faucetId || !guardian.amount) {
           throw new Error('p2id proposal is missing required metadata fields');
         }
+        if (guardian.noteType !== undefined && !isP2idNoteVisibility(guardian.noteType)) {
+          throw new Error(
+            `p2id proposal has unsupported noteType '${guardian.noteType}': expected 'public' or 'private'`,
+          );
+        }
         return {
           ...base,
           proposalType: 'p2id',
           recipientId: guardian.recipientId,
           faucetId: guardian.faucetId,
           amount: guardian.amount,
+          noteType: guardian.noteType,
         };
       case 'consume_notes':
         if (!guardian.noteIds || guardian.noteIds.length === 0) {
@@ -82,6 +96,8 @@ export class ProposalMetadataCodec {
           ...base,
           proposalType: 'consume_notes',
           noteIds: guardian.noteIds,
+          metadataVersion: guardian.consumeNotesMetadataVersion as 1 | 2 | undefined,
+          notes: guardian.consumeNotesNotes,
         };
       case 'switch_guardian':
         if (!guardian.newGuardianPubkey || !guardian.newGuardianEndpoint) {
@@ -116,12 +132,18 @@ export class ProposalMetadataCodec {
         }
         return {
           ...base,
-          proposalType: guardian.proposalType,
+          proposalType: guardian.proposalType as 'add_signer' | 'remove_signer' | 'change_threshold',
           targetThreshold: guardian.targetThreshold,
           targetSignerCommitments: guardian.signerCommitments,
         };
       default:
-        throw new Error(`Unsupported proposal type: ${guardian.proposalType as string}`);
+        // Any proposal type the SDK does not model collapses to the 'custom'
+        // bucket while preserving the original label (issue #266).
+        return {
+          ...base,
+          proposalType: 'custom',
+          rawProposalType: guardian.proposalType,
+        };
     }
   }
 
@@ -157,9 +179,14 @@ export class ProposalMetadataCodec {
         if (!metadata.recipientId || !metadata.faucetId || !metadata.amount) {
           throw new Error('p2id proposal metadata is incomplete');
         }
+        if (metadata.noteType !== undefined && !isP2idNoteVisibility(metadata.noteType)) {
+          throw new Error(`p2id proposal has unsupported noteType '${metadata.noteType}'`);
+        }
         return metadata;
-      case 'unknown':
-        throw new Error('unknown proposal type is not supported');
+      case 'custom':
+        // Custom proposals are opaque to the SDK; nothing to validate beyond
+        // the base fields. They can be listed/signed/exported, not built here.
+        return metadata;
     }
   }
 }

@@ -1,11 +1,12 @@
 use crate::proto::guardian_server::{Guardian, GuardianServer};
 use crate::proto::{
-    AccountState, ConfigureRequest, ConfigureResponse, DeltaObject as ProtoDeltaObject,
-    GetDeltaProposalRequest, GetDeltaProposalResponse, GetDeltaProposalsRequest,
-    GetDeltaProposalsResponse, GetDeltaRequest, GetDeltaResponse, GetDeltaSinceRequest,
-    GetDeltaSinceResponse, GetPubkeyRequest, GetStateRequest, GetStateResponse,
-    PushDeltaProposalRequest, PushDeltaProposalResponse, PushDeltaRequest, PushDeltaResponse,
-    SignDeltaProposalRequest, SignDeltaProposalResponse,
+    AbandonDeltaCandidateRequest, AbandonDeltaCandidateResponse, AccountState, ConfigureRequest,
+    ConfigureResponse, DeltaObject as ProtoDeltaObject, GetAccountByKeyCommitmentRequest,
+    GetAccountByKeyCommitmentResponse, GetDeltaProposalRequest, GetDeltaProposalResponse,
+    GetDeltaProposalsRequest, GetDeltaProposalsResponse, GetDeltaRequest, GetDeltaResponse,
+    GetDeltaSinceRequest, GetDeltaSinceResponse, GetPubkeyRequest, GetStateRequest,
+    GetStateResponse, PushDeltaProposalRequest, PushDeltaProposalResponse, PushDeltaRequest,
+    PushDeltaResponse, SignDeltaProposalRequest, SignDeltaProposalResponse,
 };
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -24,6 +25,10 @@ pub struct MockGuardianService {
     get_delta_response: Arc<StdMutex<Option<Result<GetDeltaResponse, Status>>>>,
     get_delta_since_response: Arc<StdMutex<Option<Result<GetDeltaSinceResponse, Status>>>>,
     get_state_response: Arc<StdMutex<Option<Result<GetStateResponse, Status>>>>,
+    get_account_by_key_commitment_response:
+        Arc<StdMutex<Option<Result<GetAccountByKeyCommitmentResponse, Status>>>>,
+    abandon_delta_candidate_response:
+        Arc<StdMutex<Option<Result<AbandonDeltaCandidateResponse, Status>>>>,
 }
 
 impl MockGuardianService {
@@ -86,6 +91,22 @@ impl MockGuardianService {
 
     pub fn with_get_state(self, response: Result<GetStateResponse, Status>) -> Self {
         *self.get_state_response.lock().unwrap() = Some(response);
+        self
+    }
+
+    pub fn with_get_account_by_key_commitment(
+        self,
+        response: Result<GetAccountByKeyCommitmentResponse, Status>,
+    ) -> Self {
+        *self.get_account_by_key_commitment_response.lock().unwrap() = Some(response);
+        self
+    }
+
+    pub fn with_abandon_delta_candidate(
+        self,
+        response: Result<AbandonDeltaCandidateResponse, Status>,
+    ) -> Self {
+        *self.abandon_delta_candidate_response.lock().unwrap() = Some(response);
         self
     }
 }
@@ -213,6 +234,31 @@ impl Guardian for MockGuardianService {
         response.map(Response::new)
     }
 
+    async fn abandon_delta_candidate(
+        &self,
+        request: Request<AbandonDeltaCandidateRequest>,
+    ) -> Result<Response<AbandonDeltaCandidateResponse>, Status> {
+        let data = request.into_inner();
+        let response = self
+            .abandon_delta_candidate_response
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| {
+                Ok(AbandonDeltaCandidateResponse {
+                    success: true,
+                    message: String::new(),
+                    account_id: data.account_id,
+                    nonce: data.nonce,
+                    state: "pending".to_string(),
+                    abandon_requested_at: "2026-07-14T12:00:00Z".to_string(),
+                    error_code: String::new(),
+                })
+            });
+
+        response.map(Response::new)
+    }
+
     async fn push_delta(
         &self,
         _request: Request<PushDeltaRequest>,
@@ -293,6 +339,20 @@ impl Guardian for MockGuardianService {
 
         response.map(Response::new)
     }
+
+    async fn get_account_by_key_commitment(
+        &self,
+        _request: Request<GetAccountByKeyCommitmentRequest>,
+    ) -> Result<Response<GetAccountByKeyCommitmentResponse>, Status> {
+        let response = self
+            .get_account_by_key_commitment_response
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| Ok(GetAccountByKeyCommitmentResponse { accounts: vec![] }));
+
+        response.map(Response::new)
+    }
 }
 
 pub async fn start_mock_server(
@@ -318,7 +378,7 @@ pub async fn start_mock_server(
 
 pub fn create_mock_delta() -> ProtoDeltaObject {
     ProtoDeltaObject {
-        account_id: "0x7bfb0f38b0fafa103f86a805594170".to_string(),
+        account_id: "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string(),
         nonce: 1,
         prev_commitment: "0x123".to_string(),
         delta_payload: r#"{"updates": []}"#.to_string(),
@@ -335,7 +395,7 @@ pub fn create_mock_delta() -> ProtoDeltaObject {
 
 pub fn create_mock_account_state() -> AccountState {
     AccountState {
-        account_id: "0x7bfb0f38b0fafa103f86a805594170".to_string(),
+        account_id: "0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b".to_string(),
         state_json: r#"{"balance": 1000}"#.to_string(),
         commitment: "0x123".to_string(),
         created_at: "2024-01-01T00:00:00Z".to_string(),

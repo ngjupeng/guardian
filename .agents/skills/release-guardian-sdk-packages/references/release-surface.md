@@ -1,6 +1,6 @@
 # Guardian SDK Release Surface
 
-Current coordinated SDK release line: `0.14.x`
+Current coordinated SDK release line: `0.16.x`
 
 ## Publishable Rust Crates
 
@@ -22,10 +22,18 @@ Current coordinated SDK release line: `0.14.x`
 1. `@openzeppelin/guardian-client`
    - manifest: `packages/guardian-client/package.json`
    - lockfile: `packages/guardian-client/package-lock.json`
-2. `@openzeppelin/miden-multisig-client`
+2. `@openzeppelin/guardian-evm-client`
+   - manifest: `packages/guardian-evm-client/package.json`
+   - lockfile: `packages/guardian-evm-client/package-lock.json`
+   - no internal release dependencies
+3. `@openzeppelin/miden-multisig-client`
    - manifest: `packages/miden-multisig-client/package.json`
    - lockfile: `packages/miden-multisig-client/package-lock.json`
    - internal release dependency: `@openzeppelin/guardian-client`
+4. `@openzeppelin/guardian-operator-client`
+   - manifest: `packages/guardian-operator-client/package.json`
+   - lockfile: `packages/guardian-operator-client/package-lock.json`
+   - no internal release dependencies
 
 ## Files Usually Touched In A Coordinated Release
 
@@ -35,6 +43,8 @@ Current coordinated SDK release line: `0.14.x`
 - `crates/miden-multisig-client/Cargo.toml`
 - `packages/guardian-client/package.json`
 - `packages/guardian-client/package-lock.json`
+- `packages/guardian-evm-client/package.json`
+- `packages/guardian-evm-client/package-lock.json`
 - `packages/miden-multisig-client/package.json`
 - `packages/miden-multisig-client/package-lock.json`
 - `docs/MULTISIG_SDK.md` if release examples or tag snippets need updating
@@ -50,5 +60,6 @@ cargo publish -p miden-multisig-client
 
 ```bash
 cd packages/guardian-client && npm publish --access public
+cd packages/guardian-evm-client && npm publish --access public
 cd packages/miden-multisig-client && npm publish --access public
 ```

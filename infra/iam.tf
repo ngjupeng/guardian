@@ -27,17 +27,44 @@ resource "aws_iam_role_policy" "ecs_task_execution_database_secret" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue"
-        ]
-        Resource = [
-          aws_secretsmanager_secret.database_url.arn
-        ]
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "secretsmanager:GetSecretValue"
+          ]
+          Resource = concat(
+            [
+              aws_secretsmanager_secret.database_url.arn
+            ],
+            local.ca_bundle_enabled ? [
+              var.rds_ca_bundle_secret_arn
+            ] : [],
+            local.evm_allowed_chain_ids_secret_arn != "" ? [
+              local.evm_allowed_chain_ids_secret_arn
+            ] : [],
+            local.evm_rpc_urls_secret_arn != "" ? [
+              local.evm_rpc_urls_secret_arn
+            ] : [],
+            local.is_prod ? [
+              data.aws_secretsmanager_secret.dashboard_cursor[0].arn
+            ] : []
+          )
+        }
+      ],
+      local.is_prod && data.aws_secretsmanager_secret.dashboard_cursor[0].kms_key_id != "" ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "kms:Decrypt"
+          ]
+          Resource = [
+            data.aws_kms_key.dashboard_cursor[0].arn
+          ]
+        }
+      ] : []
+    )
   })
 }
 
@@ -73,9 +100,76 @@ resource "aws_iam_role_policy" "ecs_task_ack_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
+        Resource = concat(
+          [data.aws_secretsmanager_secret.ack_falcon[0].arn],
+          var.guardian_ack_ecdsa_kms_key_arn == "" ? [data.aws_secretsmanager_secret.ack_ecdsa[0].arn] : []
+        )
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_ack_ecdsa_kms" {
+  count = var.guardian_ack_ecdsa_kms_key_arn != "" ? 1 : 0
+
+  name = "${var.stack_name}-ecs-task-ack-ecdsa-kms"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:GetPublicKey",
+          "kms:Sign"
+        ]
         Resource = [
-          data.aws_secretsmanager_secret.ack_falcon[0].arn,
-          data.aws_secretsmanager_secret.ack_ecdsa[0].arn
+          var.guardian_ack_ecdsa_kms_key_arn
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_storage_encryption_secret" {
+  count = local.managed_storage_encryption_enabled ? 1 : 0
+
+  name = "${var.stack_name}-ecs-task-storage-encryption-secret"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          data.aws_secretsmanager_secret.storage_encryption[0].arn
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_operator_public_keys_secret" {
+  count = var.guardian_operator_public_keys_secret_arn != "" || local.managed_operator_public_keys_secret_enabled ? 1 : 0
+
+  name = "${var.stack_name}-ecs-task-operator-public-keys-secret"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          local.operator_public_keys_secret_arn
         ]
       }
     ]

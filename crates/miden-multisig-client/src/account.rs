@@ -143,6 +143,7 @@ impl MultisigAccount {
                 ProcedureName::UpdateProcedureThreshold
             }
             TransactionType::SwitchGuardian { .. } => ProcedureName::UpdateGuardian,
+            TransactionType::Custom => return self.threshold(),
         };
 
         self.effective_threshold_for_procedure(procedure)
@@ -330,7 +331,7 @@ mod tests {
     fn effective_threshold_for_transaction_maps_to_expected_procedures() {
         let account = build_test_account();
         let account_id =
-            AccountId::from_hex("0x7bfb0f38b0fafa103f86a805594170").expect("account id");
+            AccountId::from_hex("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b").expect("account id");
 
         assert_eq!(
             account
@@ -338,6 +339,7 @@ mod tests {
                     recipient: account_id,
                     faucet_id: account_id,
                     amount: 10,
+                    note_type: miden_protocol::note::NoteType::Public,
                 })
                 .expect("threshold"),
             1
@@ -346,6 +348,8 @@ mod tests {
             account
                 .effective_threshold_for_transaction(&TransactionType::ConsumeNotes {
                     note_ids: vec![NoteId::from_raw(word(5))],
+                    metadata_version: None,
+                    notes: Vec::new(),
                 })
                 .expect("threshold"),
             2
@@ -383,6 +387,13 @@ mod tests {
                 })
                 .expect("threshold"),
             1
+        );
+        assert_eq!(
+            account
+                .effective_threshold_for_transaction(&TransactionType::Custom)
+                .expect("threshold"),
+            2,
+            "custom proposals use the account default threshold"
         );
     }
 

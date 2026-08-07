@@ -11,6 +11,21 @@ export interface Signer {
     requestPayload: RequestAuthPayload
   ): Promise<string> | string;
   signCommitment(commitmentHex: string): Promise<string> | string;
+
+  /**
+   * Sign the lookup-bound digest for `/state/lookup`. The implementation
+   * MUST sign `LookupAuthMessage::to_word(timestamp_ms, key_commitment)` —
+   * domain-separated from `AuthRequestMessage`. The canonical implementation
+   * lives in `@openzeppelin/miden-multisig-client/lookupAuth.ts`; this
+   * zero-dependency package does not pull in the Miden SDK to compute it.
+   *
+   * Optional: signers that do not implement it cause the HTTP client to
+   * throw a clear error rather than send a signature the server will reject.
+   */
+  signLookupMessage?(
+    keyCommitmentHex: string,
+    timestampMs: number
+  ): Promise<string> | string;
 }
 
 export interface FalconSignature {
@@ -50,7 +65,12 @@ export type DeltaStatus =
   | { status: 'pending'; timestamp: string; proposerId: string; cosignerSigs: CosignerSignature[] }
   | { status: 'candidate'; timestamp: string }
   | { status: 'canonical'; timestamp: string }
-  | { status: 'discarded'; timestamp: string };
+  /** Candidate the Guardian gave up verifying (retry exhaustion or a
+   * confirmed-diverged observation) but kept for background
+   * reconciliation (issue #345); promoted to `canonical` if the chain
+   * ever shows it landed, dropped after a server-side TTL otherwise. */
+  | { status: 'retained'; timestamp: string; reason?: 'retry_exhausted' | 'diverged' }
+  | { status: 'discarded'; timestamp: string; reason?: string };
 
 export type ProposalType =
   | 'add_signer'
@@ -61,7 +81,9 @@ export type ProposalType =
   | 'consume_notes'
   | 'p2id'
   | 'custom'
-  | 'unknown';
+  // Arbitrary server-defined proposal labels (issue #266); known literals are
+  // kept for autocomplete while `(string & {})` admits any custom label.
+  | (string & {});
 
 export interface ProposalMetadata {
   proposalType?: ProposalType;
@@ -74,9 +96,15 @@ export interface ProposalMetadata {
   newGuardianPubkey?: string;
   newGuardianEndpoint?: string;
   noteIds?: string[];
+  /** consume_notes metadata version (issue #229). Absent => v1. */
+  consumeNotesMetadataVersion?: number;
+  /** v2 embedded notes (base64), index-aligned with `noteIds`. */
+  consumeNotesNotes?: string[];
   recipientId?: string;
   faucetId?: string;
   amount?: string;
+  /** P2ID note visibility, "public" or "private" (issue #322). Absent => public. */
+  noteType?: string;
 }
 
 export interface DeltaObject {
@@ -132,6 +160,15 @@ export interface PubkeyResponse {
   pubkey?: string;
 }
 
+export interface StatusResponse {
+  status: string;
+  version: string;
+  gitCommit: string;
+  environment: string;
+  startedAt: string;
+  uptimeSeconds: number;
+}
+
 export interface DeltaProposalRequest {
   accountId: string;
   nonce: number;
@@ -157,6 +194,34 @@ export interface SignProposalRequest {
   signature: ProposalSignature;
 }
 
+export interface AbandonCandidateResponse {
+  accountId: string;
+  nonce: number;
+  /**
+   * `'pending'` while the guardian's worker still has to resolve the
+   * abandon intent (the account stays locked until then); `'abandoned'`
+   * once the delta is discarded as client-abandoned and the account
+   * released; `'retained'` when the worker had already stopped
+   * verifying the candidate and released the account — unlocked, but
+   * the on-chain outcome is still uncertain: background reconciliation
+   * may promote the delta until its retention TTL expires.
+   */
+  state: 'pending' | 'abandoned' | 'retained';
+  /**
+   * RFC 3339 UTC timestamp of the recorded abandon request. Retries
+   * return the original timestamp; absent once resolved.
+   */
+  abandonRequestedAt?: string;
+}
+
+/**
+ * Resolution of an abandon request, as observed via the delta feed.
+ * `'retained'` means the account slot is released but the on-chain
+ * outcome is still uncertain — "unlocked but unresolved", never to be
+ * read as "the transaction did not land".
+ */
+export type AbandonStatus = 'waiting' | 'landed' | 'abandoned' | 'retained' | 'unexpected';
+
 export interface PushDeltaResponse {
   accountId: string;
   nonce: number;
@@ -164,4 +229,18 @@ export interface PushDeltaResponse {
   ackSig?: string;
   ackPubkey?: string;
   ackScheme?: string;
+}
+
+/**
+ * Single match in a `/state/lookup` response. Wrapped in its own type so the
+ * shape can be extended (role tags, per-account metadata) in a forward-
+ * compatible way — additive server fields will not break existing clients.
+ */
+export interface LookupAccount {
+  accountId: string;
+}
+
+/** Response shape for `lookupAccountByKeyCommitment`. */
+export interface LookupResponse {
+  accounts: LookupAccount[];
 }

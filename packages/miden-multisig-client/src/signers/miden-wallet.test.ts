@@ -54,28 +54,20 @@ describe('MidenWalletSigner', () => {
       expect(signer.publicKey).toBe('0xcommitment');
     });
 
-    it('should use explicit publicKey when provided', () => {
-      const signer = new MidenWalletSigner(
-        mockWallet,
-        '0xcommitment',
-        'ecdsa',
-        undefined,
-        '0xwalletpubkey',
-      );
-      expect(signer.publicKey).toBe('0xwalletpubkey');
+    it('throws on an invalid explicit ECDSA publicKey instead of falling back to the commitment', () => {
+      expect(
+        () => new MidenWalletSigner(mockWallet, '0xcommitment', 'ecdsa', undefined, '0xwalletpubkey'),
+      ).toThrow(/invalid ECDSA public key/);
     });
 
-    it('should use localAuthSigner publicKey when provided', () => {
-      const localSigner: Signer = {
-        commitment: '0xlocal',
-        publicKey: '0xlocalpubkey',
-        scheme: 'ecdsa',
-        signAccountIdWithTimestamp: vi.fn(),
-        signCommitment: vi.fn(),
-      };
-      const signer = new MidenWalletSigner(mockWallet, '0xcommitment', 'ecdsa', localSigner);
-      expect(signer.publicKey).toBe('0xlocalpubkey');
+    it('does not fall back to the commitment for an ECDSA signer with no key (throws until a signature exists)', () => {
+      const signer = new MidenWalletSigner(mockWallet, '0xcommitment', 'ecdsa');
+      expect(() => signer.publicKey).toThrow(/not available yet/);
     });
+
+    // ECDSA publicKey resolution against a real commitment (explicit key and
+    // localAuthSigner, match and mismatch) needs real Poseidon2 and is covered in
+    // miden-wallet.ecdsa-recovery.test.ts, which runs the WASM SDK.
   });
 
   describe('signAccountIdWithTimestamp', () => {
@@ -150,6 +142,54 @@ describe('MidenWalletSigner', () => {
       );
 
       expect(mockWallet.signBytes).toHaveBeenCalledWith(expect.any(Uint8Array), 'word');
+    });
+  });
+
+  describe('signLookupMessage', () => {
+    it('delegates to localAuthSigner when present', async () => {
+      const localSigner: Signer = {
+        commitment: '0xlocal',
+        publicKey: '0xlocalpubkey',
+        scheme: 'ecdsa',
+        signAccountIdWithTimestamp: vi.fn(),
+        signCommitment: vi.fn(),
+        signLookupMessage: vi.fn().mockResolvedValue('0xlocallookupsig'),
+      };
+      const signer = new MidenWalletSigner(mockWallet, '0xcommitment', 'ecdsa', localSigner);
+
+      const result = await signer.signLookupMessage('0x' + 'cc'.repeat(32), 1700000000);
+
+      expect(result).toBe('0xlocallookupsig');
+      expect(localSigner.signLookupMessage).toHaveBeenCalledWith(
+        '0x' + 'cc'.repeat(32),
+        1700000000,
+      );
+      expect(mockWallet.signBytes).not.toHaveBeenCalled();
+    });
+
+    it('uses wallet signing over the LookupAuthMessage digest when no localAuthSigner', async () => {
+      const signer = new MidenWalletSigner(mockWallet, '0xcommitment', 'falcon');
+
+      const result = await signer.signLookupMessage('0x' + 'cc'.repeat(32), 1700000000);
+
+      expect(mockWallet.signBytes).toHaveBeenCalledTimes(1);
+      expect(mockWallet.signBytes).toHaveBeenCalledWith(expect.any(Uint8Array), 'word');
+      expect(result).toMatch(/^0x/);
+    });
+
+    it('falls back to wallet signing when localAuthSigner does not implement signLookupMessage', async () => {
+      const localSigner: Signer = {
+        commitment: '0xlocal',
+        publicKey: '0xlocalpubkey',
+        scheme: 'ecdsa',
+        signAccountIdWithTimestamp: vi.fn(),
+        signCommitment: vi.fn(),
+      };
+      const signer = new MidenWalletSigner(mockWallet, '0xcommitment', 'ecdsa', localSigner);
+
+      await signer.signLookupMessage('0x' + 'cc'.repeat(32), 1700000000);
+
+      expect(mockWallet.signBytes).toHaveBeenCalledTimes(1);
     });
   });
 

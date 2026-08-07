@@ -18,7 +18,10 @@ Resources created:
 - Application Load Balancer with HTTP and gRPC target groups
 - RDS PostgreSQL instance and subnet group
 - Secrets Manager secret for `DATABASE_URL`
+- Optional Secrets Manager secret for dashboard operator public keys
+- Optional Secrets Manager secrets for EVM allowed chain IDs and RPC URLs
 - Secrets Manager secrets for stable Falcon and ECDSA ack keys in `prod`
+- Pre-created Secrets Manager secret for the shared dashboard cursor key in `prod`
 - Security groups for the ALB, server task, and database
 - CloudWatch log groups
 - IAM roles for ECS task execution and runtime
@@ -95,6 +98,23 @@ server_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/guardian-server
 # guardian_rate_per_min = 5000
 # guardian_db_pool_max_size = 32
 # guardian_metadata_db_pool_max_size = 32
+# guardian_canonicalization_fast_promotion_enabled = false
+
+# Optional: dashboard operator Falcon public keys managed by Terraform
+# guardian_operator_public_keys = [
+#   "0x<alice-falcon-public-key>",
+#   "0x<bob-falcon-public-key>",
+# ]
+
+# Optional: existing dashboard operator Falcon public keys secret
+# guardian_operator_public_keys_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:guardian/operators"
+
+# Optional: EVM runtime configuration when using Terraform directly.
+# scripts/aws-deploy.sh derives these from config/evm/chains.json by default.
+# guardian_evm_allowed_chain_ids = "1,11155111"
+# guardian_evm_rpc_urls = "1=https://ethereum-rpc.publicnode.com,11155111=https://ethereum-sepolia-rpc.publicnode.com"
+# guardian_evm_entrypoint_address = "0x433709009b8330fda32311df1c2afa402ed8d009"
+# guardian_cors_allowed_origins = "https://accounts.openzeppelin.com"
 
 # Optional: Route 53 hosted zone ID
 # route53_zone_id = "Z1234567890ABC"
@@ -108,6 +128,13 @@ terraform init
 terraform plan
 terraform apply
 ```
+
+For direct prod Terraform usage, create the dashboard cursor secret before
+planning. Its value must be exactly 64 hexadecimal characters. Terraform checks
+that the secret exists without reading its value into state; the deployment
+helper performs the value-shape validation. If a customer-managed KMS key
+encrypts the secret, its key policy must allow the ECS task execution role to
+decrypt it.
 
 When you use `scripts/aws-deploy.sh`, it keeps separate local Terraform state files per `STACK_NAME` and `deployment_stage`, using:
 
@@ -124,16 +151,21 @@ cp infra/terraform.tfstate infra/terraform.guardian.dev.tfstate
 cp infra/terraform.tfstate.backup infra/terraform.guardian.dev.tfstate.backup 2>/dev/null || true
 ```
 
-For `prod`, create the ACK key secrets once before the first deploy:
+For `prod`, create the ACK key and dashboard cursor secrets once before the first
+deploy:
 
 ```bash
 DEPLOY_STAGE=prod ./scripts/aws-deploy.sh bootstrap-ack-keys
+DEPLOY_STAGE=prod ./scripts/aws-deploy.sh bootstrap-dashboard-cursor-secret
 ```
 
-Normal deploys do not create or rotate ACK keys. The server fetches these prod Secrets Manager entries at startup, imports them into the filesystem keystore, and then signs through the filesystem keystore like every other environment:
+Normal deploys do not create or rotate these secrets. Terraform requires the
+cursor secret to exist, grants the ECS execution role access, and injects its
+value as `GUARDIAN_DASHBOARD_CURSOR_SECRET` into every prod task.
 
-- `guardian-prod/server/ack-falcon-secret-key`
-- `guardian-prod/server/ack-ecdsa-secret-key`
+By default the secret names follow `${STACK_NAME}/server/ack-{falcon,ecdsa}-secret-key`, so each stack gets its own pair (`guardian-prod` → `guardian-prod/server/ack-falcon-secret-key`, etc.) and multiple Guardian instances can coexist in the same AWS account. To pin a stack at an existing legacy name, set `GUARDIAN_ACK_FALCON_SECRET_NAME` and `GUARDIAN_ACK_ECDSA_SECRET_NAME` before `bootstrap-ack-keys` and `deploy` — they flow through to the `guardian_ack_falcon_secret_name` / `guardian_ack_ecdsa_secret_name` Terraform variables.
+
+> The ECS task definition receives the resolved name as the server's `GUARDIAN_ACK_FALCON_SECRET_ID` / `GUARDIAN_ACK_ECDSA_SECRET_ID` env vars — that is the runtime env the server reads to call Secrets Manager. You do not set those directly when deploying via `scripts/aws-deploy.sh`.
 
 ### 4. Get Outputs
 
@@ -174,6 +206,14 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `stack_name` | `guardian` | Base name used to derive stack resource names |
 | `deployment_stage` | `dev` | Deployment stage profile |
 | `server_image_uri` | (required) | ECR image URI for the server, preferably pinned to a digest |
+| `guardian_operator_public_keys` | `[]` | Falcon public keys used to create a stack-scoped operator public keys secret |
+| `guardian_operator_public_keys_secret_arn` | `""` | Existing operator public keys secret ARN; takes precedence over the managed list |
+| `guardian_evm_allowed_chain_ids` | `""` | EVM chain IDs used to create a stack-scoped allowed chain IDs secret |
+| `guardian_evm_allowed_chain_ids_secret_arn` | `""` | Existing EVM allowed chain IDs secret ARN; takes precedence over the managed value |
+| `guardian_evm_rpc_urls` | `""` | EVM `chain_id=url` entries used to create a stack-scoped RPC URLs secret |
+| `guardian_evm_rpc_urls_secret_arn` | `""` | Existing EVM RPC URLs secret ARN; takes precedence over the managed value |
+| `guardian_evm_entrypoint_address` | `""` | Shared EVM EntryPoint address injected into the server task |
+| `guardian_cors_allowed_origins` | `""` | Comma-separated explicit HTTP origins allowed by credentialed CORS |
 | `vpc_id` | (default VPC) | VPC ID |
 | `subnet_ids` | (all subnets in VPC) | Subnet IDs for ECS tasks and ALB |
 | `rds_proxy_subnet_ids` | filtered `subnet_ids` | Optional dedicated subnet IDs for RDS Proxy |
@@ -195,8 +235,13 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `guardian_rate_limit_enabled` | `true` | Whether Guardian HTTP rate limiting is enabled |
 | `guardian_rate_burst_per_sec` | `10` in dev, `200` in prod | Guardian HTTP burst limit |
 | `guardian_rate_per_min` | `60` in dev, `5000` in prod | Guardian HTTP sustained limit |
+| `guardian_max_replicas` | greater of desired count and autoscaling max when enabled, desired count otherwise (prod `6` by default) | `GUARDIAN_MAX_REPLICAS` rate-limit partition divisor; an explicit value is clamped **up** to steady-state capacity. A rolling deployment may temporarily allow up to `server_deployment_maximum_percent / 100` times the configured fleet limit. |
+| `guardian_dashboard_commitment_rate_burst_per_sec` | `6` | Fleet-wide dashboard per-commitment burst budget, partitioned by the steady-state replica capacity |
+| `guardian_dashboard_commitment_rate_per_min` | `30` | Fleet-wide dashboard per-commitment sustained budget, partitioned by the steady-state replica capacity |
+| `server_deployment_maximum_percent` | `200` | ECS rolling-deploy task ceiling (percent of desired count). The temporary fleet-wide rate allowance can scale by the same factor during a rollout. Must be an integer in `(100, 200]` and allow at least one surge task at the minimum positive desired capacity, including autoscaling minimum |
 | `guardian_db_pool_max_size` | `16` in dev, `32` in prod | Guardian storage DB pool size |
 | `guardian_metadata_db_pool_max_size` | matches storage by default | Guardian metadata DB pool size |
+| `guardian_canonicalization_fast_promotion_enabled` | `true` | Enables the recent-candidate promotion-only pass in the ECS task definition |
 | `log_retention_days` | `7` | CloudWatch log retention in days |
 
 ## Outputs
@@ -212,13 +257,23 @@ aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$
 | `rds_instance_class` | Effective RDS instance class |
 | `rds_allocated_storage` | Effective allocated RDS storage in GiB |
 | `database_url_secret_arn` | Secrets Manager ARN for the server `DATABASE_URL` |
+| `operator_public_keys_secret_arn` | Secrets Manager ARN used for dashboard operator public keys |
+| `operator_public_keys_secret_name` | Terraform-managed operator public keys secret name, when created |
+| `guardian_evm_allowed_chain_ids_secret_arn` | Secrets Manager ARN used for EVM allowed chain IDs |
+| `guardian_evm_rpc_urls_secret_arn` | Secrets Manager ARN used for EVM RPC URLs |
+| `guardian_evm_entrypoint_address` | Shared EVM EntryPoint address configured for the server |
+| `guardian_cors_allowed_origins` | Explicit CORS origins configured for the server |
 | `ack_falcon_secret_name` | Secrets Manager name for the Falcon ack key |
 | `ack_ecdsa_secret_name` | Secrets Manager name for the ECDSA ack key |
+| `dashboard_cursor_secret_name` | Secrets Manager name for the shared dashboard cursor key |
 | `ecs_cluster_arn` | ECS cluster ARN |
 | `server_service_arn` | Server ECS service ARN |
 | `server_log_group` | CloudWatch log group for the server |
 | `cluster_log_group` | CloudWatch log group for ECS execute command |
 | `guardian_rate_limit_enabled` | Whether HTTP rate limiting is enabled |
+| `guardian_max_replicas` | Effective `GUARDIAN_MAX_REPLICAS` after clamping to steady-state capacity |
+| `guardian_dashboard_commitment_rate_burst_per_sec` | Effective fleet-wide dashboard per-commitment burst budget |
+| `guardian_dashboard_commitment_rate_per_min` | Effective fleet-wide dashboard per-commitment sustained budget |
 
 ## Stage Profiles
 
@@ -257,6 +312,38 @@ This Terraform stack is RDS-only. Existing stacks that still run ECS-hosted Post
 4. Restore the backup into the RDS database.
 5. Validate the public Guardian endpoints.
 6. Confirm the old Postgres ECS and Cloud Map resources are gone from AWS before considering the cutover complete.
+
+## Storage encryption key
+
+Optional storage-at-rest encryption (see
+[`docs/PRODUCTION.md`](../docs/PRODUCTION.md#storage-encryption)) reads its key
+from a Secrets Manager secret named by `GUARDIAN_STORAGE_ENCRYPTION_KEY_SECRET_ID`.
+
+The key material is created out-of-band (it must never enter Terraform state),
+then the stack wires the rest automatically, mirroring the ACK key secrets:
+
+1. Bootstrap the key secret once, against an empty store:
+
+   ```bash
+   DEPLOY_STAGE=prod STACK_NAME=guardian-prod \
+     ./scripts/aws-deploy.sh bootstrap-storage-encryption-key
+   ```
+
+2. Enable it on the next deploy by exporting the secret name (the bootstrap
+   command prints it):
+
+   ```bash
+   GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME=guardian-prod/server/storage-encryption-key \
+     DEPLOY_STAGE=prod STACK_NAME=guardian-prod ./scripts/aws-deploy.sh deploy
+   ```
+
+Setting `GUARDIAN_STORAGE_ENCRYPTION_SECRET_NAME` is what enables encryption — the
+deploy script passes it through to `guardian_storage_encryption_secret_name`, and
+the stack then grants the ECS **task** role `secretsmanager:GetSecretValue` on that
+secret and injects `GUARDIAN_STORAGE_ENCRYPTION_KEY_SECRET_ID`. Leaving it unset
+keeps storage in plaintext at rest. Wiring is prod-only; dev uses
+`GUARDIAN_STORAGE_ENCRYPTION_KEY` directly. Rotation details live in
+[`docs/runbooks/secrets.md`](../docs/runbooks/secrets.md#storage-encryption-key).
 
 ## Troubleshooting
 

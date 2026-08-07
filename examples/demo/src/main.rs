@@ -4,12 +4,12 @@ mod menu;
 mod state;
 
 use miden_client::rpc::Endpoint;
-use miden_multisig_client::SignatureScheme;
+use miden_multisig_client::{ProverConfig, ProverRetryPolicy, SignatureScheme};
 use rustyline::DefaultEditor;
 
 use actions::{
-    action_create_account, action_list_notes, action_proposal_management, action_show_account,
-    action_show_status, action_sync_account, action_verify_state_commitment,
+    action_create_account, action_list_notes, action_proposal_management, action_recover_by_key,
+    action_show_account, action_show_status, action_sync_account, action_verify_state_commitment,
 };
 use display::{
     print_banner, print_error, print_full_hex, print_section, print_success, print_waiting,
@@ -66,6 +66,28 @@ async fn startup(editor: &mut DefaultEditor) -> Result<SessionState, String> {
         }
     };
 
+    println!("\n  Select transaction prover:");
+    println!("    [1] Network default");
+    println!("    [2] Custom remote prover");
+    println!();
+
+    let prover_choice = prompt_input(editor, "Prover [1]: ")?;
+    let mut prover_config = ProverConfig::new();
+    if prover_choice.trim() == "2" {
+        let prover_url = prompt_input(editor, "Enter prover URL: ")?;
+        prover_config = prover_config
+            .with_url(prover_url)
+            .map_err(|error| error.to_string())?;
+    }
+    let attempts = prompt_input(editor, "Proof attempts [2]: ")?;
+    if !attempts.trim().is_empty() {
+        let max_attempts = attempts
+            .trim()
+            .parse::<u32>()
+            .map_err(|error| format!("Invalid proof attempt budget: {error}"))?;
+        prover_config = prover_config.with_retry_policy(ProverRetryPolicy::new(max_attempts));
+    }
+
     println!("\n  GUARDIAN Server: {}", guardian_endpoint);
     println!(
         "  Miden Node: {}://{}{}",
@@ -104,7 +126,12 @@ async fn startup(editor: &mut DefaultEditor) -> Result<SessionState, String> {
 
     let mut state = SessionState::new()?;
     state
-        .initialize_client(miden_endpoint, &guardian_endpoint, signature_scheme)
+        .initialize_client(
+            miden_endpoint,
+            &guardian_endpoint,
+            signature_scheme,
+            prover_config,
+        )
         .await?;
 
     let commitment_hex = state.user_commitment_hex()?;
@@ -157,6 +184,7 @@ async fn handle_action(
         MenuAction::VerifyStateCommitment => action_verify_state_commitment(state).await,
         MenuAction::ListNotes => action_list_notes(state).await,
         MenuAction::ProposalManagement => action_proposal_management(state, editor).await,
+        MenuAction::RecoverByKey => action_recover_by_key(state).await,
         MenuAction::ShowAccount => action_show_account(state).await,
         MenuAction::ShowStatus => action_show_status(state).await,
         MenuAction::Quit => {

@@ -5,14 +5,56 @@
 
 use std::collections::HashSet;
 
-use guardian_shared::ProposalSignature;
+use guardian_shared::{ProposalSignature, ToJson};
+use miden_client::transaction::TransactionRequest;
 
 use super::{MultisigClient, ProposalResult};
+
+/// Immediate outcome of an abandon request (issue #319).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbandonRequestState {
+    /// The intent is recorded; GUARDIAN's worker resolves it after the
+    /// abandon quarantine. Poll [`MultisigClient::abandon_status`].
+    Pending,
+    /// The abandon was already resolved; the account is released.
+    Abandoned,
+    /// GUARDIAN had already stopped verifying the candidate and released
+    /// the account slot. Unlocked, but the on-chain outcome is still
+    /// uncertain: background reconciliation may promote the delta to
+    /// canonical until its retention TTL expires. Sync and check the
+    /// chain before replacing it.
+    Retained,
+}
+
+/// Resolution of an abandon request, as observed via the delta feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbandonStatus {
+    /// The delta is still a candidate; the quarantine is running.
+    Waiting,
+    /// The transaction landed after all; the delta canonicalized.
+    Landed,
+    /// The abandon completed; the delta is discarded as client-abandoned
+    /// and the account is released.
+    Abandoned,
+    /// GUARDIAN stopped verifying and released the account slot, but the
+    /// on-chain outcome is still uncertain — "unlocked but unresolved",
+    /// never to be read as "the transaction did not land". Background
+    /// reconciliation may promote the delta to canonical until its
+    /// retention TTL expires; sync and check the chain before replacing
+    /// it.
+    Retained,
+    /// The delta is missing or in a state no abandon flow produces.
+    Unexpected,
+}
 use crate::error::{MultisigError, Result};
-use crate::execution::{SignatureInput, build_final_transaction_request, collect_signature_advice};
+use crate::execution::{
+    SignatureAdvice, SignatureInput, build_final_transaction_request, collect_signature_advice,
+};
 use crate::keystore::proposal_public_key_hex;
-use crate::proposal::{Proposal, TransactionType};
-use crate::transaction::ProposalBuilder;
+use crate::proposal::{Proposal, TransactionType, is_builtin_proposal_type};
+use crate::transaction::{
+    ProposalBuilder, deserialize_transaction_request, execute_for_summary, word_to_hex,
+};
 
 impl MultisigClient {
     async fn get_proposal(
@@ -37,12 +79,19 @@ impl MultisigClient {
 
     /// Lists pending proposals for the current account.
     ///
+    /// Proposals whose nonce is not above the committed account nonce are
+    /// skipped: they have already been executed or superseded, but GUARDIAN may
+    /// still report them pending until canonicalization prunes them.
+    ///
     /// # Errors
     ///
     /// Returns an error if any proposal from GUARDIAN cannot be parsed. This ensures
     /// malformed GUARDIAN payloads are surfaced rather than silently dropped.
     pub async fn list_proposals(&mut self) -> Result<Vec<Proposal>> {
-        let account_id = self.require_account()?.id();
+        let (account_id, current_nonce) = {
+            let account = self.require_account()?;
+            (account.id(), account.nonce())
+        };
 
         let mut guardian_client = self.create_authenticated_guardian_client().await?;
 
@@ -57,6 +106,11 @@ impl MultisigClient {
         for delta in &response.proposals {
             Self::ensure_proposal_account_id(&delta.account_id, &account_id)?;
             let proposal = Proposal::from(delta)?;
+
+            if proposal.nonce <= current_nonce {
+                continue;
+            }
+
             self.verify_proposal_summary_binding(&proposal).await?;
             proposals.push(proposal);
         }
@@ -120,6 +174,17 @@ impl MultisigClient {
     /// 4. Build the transaction with all cosigner signatures + GUARDIAN ack
     /// 5. Execute the transaction on-chain
     /// 6. Sync and update local account state
+    ///
+    /// A proposal whose nonce is not strictly above the committed account nonce
+    /// is rejected: it has already been executed or superseded, and re-executing
+    /// would double-apply the intent and corrupt the nonce/delta sequence
+    /// GUARDIAN tracks for canonicalization.
+    ///
+    /// `SwitchGuardian` carries no GUARDIAN ack in the transaction itself (the
+    /// switch happens later in `finalize_transaction`), but its delta is still
+    /// pushed to the pre-switch GUARDIAN so it canonicalizes like any other
+    /// proposal. That push is best-effort: an unreachable GUARDIAN must not block
+    /// the switch, so the ack and any error are discarded.
     pub async fn execute_proposal(&mut self, proposal_id: &str) -> Result<()> {
         // Sync with the network before executing to ensure we have latest state
         self.sync().await?;
@@ -129,6 +194,15 @@ impl MultisigClient {
 
         let proposal = self.get_proposal(&account_id, proposal_id).await?;
 
+        if proposal.nonce <= account.nonce() {
+            return Err(MultisigError::InvalidConfig(format!(
+                "proposal nonce {} is not greater than the current account nonce {}; \
+                 it has already been executed or superseded",
+                proposal.nonce,
+                account.nonce()
+            )));
+        }
+
         // Verify proposal is ready (has enough signatures)
         if !proposal.status.is_ready() {
             let (collected, required) = proposal.signature_counts();
@@ -136,6 +210,17 @@ impl MultisigClient {
                 collected,
                 required,
             });
+        }
+
+        // Custom proposals (issue #266) have no per-type reconstruction recipe,
+        // so the SDK cannot build/submit them. The integration executes them
+        // with its own recipe using the advice from `prepare_custom_execution`.
+        if matches!(proposal.transaction_type, TransactionType::Custom) {
+            return Err(MultisigError::UnsupportedTransactionType(
+                "custom proposals are executed by the integration; call \
+                 prepare_custom_execution to get the cosigner + GUARDIAN advice"
+                    .to_string(),
+            ));
         }
 
         let tx_summary_commitment = proposal.tx_summary.to_commitment();
@@ -177,6 +262,29 @@ impl MultisigClient {
                 )
                 .await?;
             signature_advice.push(guardian_advice);
+        } else {
+            // SwitchGuardian: push the delta to the pre-switch GUARDIAN so it
+            // canonicalizes there and the account is released (issue #305).
+            // Best-effort — an unreachable GUARDIAN must not block the switch —
+            // but the outcome must be observable: a silently lost push leaves
+            // the old GUARDIAN serving a released account (split-brain) with
+            // nothing in any log to diagnose it by.
+            if let Err(error) = self
+                .get_guardian_ack_signature(
+                    &account,
+                    proposal.nonce,
+                    &proposal.tx_summary,
+                    tx_summary_commitment,
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    "best-effort SwitchGuardian delta push to the pre-switch \
+                     GUARDIAN failed; it will keep serving this account until \
+                     reconciliation"
+                );
+            }
         }
 
         // Build the final transaction request with all signatures
@@ -210,6 +318,199 @@ impl MultisigClient {
         // Execute and finalize
         self.finalize_transaction(account_id, final_tx_request, &proposal.transaction_type)
             .await
+    }
+
+    /// Creates a proposal from a producer-built transaction the SDK does not
+    /// model (issue #266 producer API). `transaction_request_bytes` is a serialized
+    /// `TransactionRequest`; `proposal_type` is a free-form, non-empty label
+    /// that MUST NOT collide with a built-in type. The integration keeps its own
+    /// recipe to execute later via `prepare_custom_execution`.
+    pub async fn propose_custom_transaction(
+        &mut self,
+        transaction_request_bytes: &[u8],
+        proposal_type: &str,
+    ) -> Result<Proposal> {
+        let proposal_type = proposal_type.trim().to_lowercase();
+        if proposal_type.is_empty() {
+            return Err(MultisigError::InvalidConfig(
+                "proposal_type must not be empty".to_string(),
+            ));
+        }
+        if !proposal_type
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(MultisigError::InvalidConfig(format!(
+                "proposal_type '{}' must be lowercase snake_case ([a-z0-9_]): no spaces, hyphens, or other characters",
+                proposal_type
+            )));
+        }
+        if is_builtin_proposal_type(&proposal_type) {
+            return Err(MultisigError::UnsupportedTransactionType(format!(
+                "'{}' is a built-in proposal type; use the typed proposal API instead",
+                proposal_type
+            )));
+        }
+
+        self.sync().await?;
+        let account = self.require_account()?.clone();
+        let account_id = account.id();
+
+        let tx_request = deserialize_transaction_request(transaction_request_bytes)?;
+        let tx_summary =
+            execute_for_summary(&mut self.miden_client, account_id, tx_request).await?;
+        let tx_commitment = tx_summary.to_commitment();
+
+        let required_signatures = account.threshold()? as usize;
+
+        let metadata = crate::proposal::ProposalMetadata {
+            tx_summary_json: Some(tx_summary.to_json()),
+            proposal_type: Some(proposal_type.to_string()),
+            required_signatures: Some(required_signatures),
+            signers: vec![self.key_manager.commitment_hex()],
+            ..Default::default()
+        };
+
+        let payload = crate::payload::ProposalPayload::new(&tx_summary)
+            .with_signature(self.key_manager.as_ref(), tx_commitment)
+            .with_custom_metadata(proposal_type.to_string())
+            .with_required_signatures(required_signatures);
+
+        let nonce = account.nonce() + 1;
+        let mut guardian_client = self.create_authenticated_guardian_client().await?;
+        let response = guardian_client
+            .push_delta_proposal(&account_id, nonce, &payload.to_json())
+            .await
+            .map_err(|e| {
+                MultisigError::GuardianServer(format!("failed to push proposal: {}", e))
+            })?;
+
+        let proposal = Proposal::new(tx_summary, nonce, TransactionType::Custom, metadata);
+
+        if !proposal
+            .id
+            .trim_start_matches("0x")
+            .eq_ignore_ascii_case(response.commitment.trim_start_matches("0x"))
+        {
+            return Err(MultisigError::GuardianServer(format!(
+                "GUARDIAN returned proposal commitment {} but expected {}",
+                response.commitment, proposal.id
+            )));
+        }
+
+        Ok(proposal)
+    }
+
+    /// Assembles the validated execution advice for a threshold-met custom
+    /// proposal (issue #266 producer API): the cosigner signatures and the
+    /// GUARDIAN acknowledgment, keyed for the transaction's advice map. The
+    /// integration injects this into its own rebuilt transaction request
+    /// (`request.advice_map_mut().extend(advice)`) and submits it via its own
+    /// Miden client.
+    ///
+    /// `transaction_request_bytes` (the serialized transaction request) is used only to verify,
+    /// before the acknowledgment is requested, that it reproduces the signed
+    /// proposal commitment. On a not-ready proposal or a binding mismatch this
+    /// fails before requesting the acknowledgment.
+    pub async fn prepare_custom_execution(
+        &mut self,
+        proposal_id: &str,
+        transaction_request_bytes: &[u8],
+    ) -> Result<Vec<SignatureAdvice>> {
+        self.sync().await?;
+        let account = self.require_account()?.clone();
+        let account_id = account.id();
+
+        let proposal = self.get_proposal(&account_id, proposal_id).await?;
+
+        if !matches!(proposal.transaction_type, TransactionType::Custom) {
+            return Err(MultisigError::UnsupportedTransactionType(
+                "prepare_custom_execution is only for custom proposals; use execute_proposal \
+                 for built-in types"
+                    .to_string(),
+            ));
+        }
+
+        if !proposal.status.is_ready() {
+            let (collected, required) = proposal.signature_counts();
+            return Err(MultisigError::ProposalNotReady {
+                collected,
+                required,
+            });
+        }
+
+        let tx_summary_commitment = proposal.tx_summary.to_commitment();
+
+        let probe_request = deserialize_transaction_request(transaction_request_bytes)?;
+        let derived_summary =
+            execute_for_summary(&mut self.miden_client, account_id, probe_request).await?;
+        let derived_commitment = derived_summary.to_commitment();
+        if derived_commitment != tx_summary_commitment {
+            return Err(MultisigError::InvalidConfig(format!(
+                "transaction request does not match the signed proposal commitment \
+                 (expected {}, got {})",
+                word_to_hex(&tx_summary_commitment),
+                word_to_hex(&derived_commitment)
+            )));
+        }
+
+        let mut signature_inputs: Vec<SignatureInput> = proposal
+            .signatures
+            .into_iter()
+            .map(|signature| SignatureInput {
+                signer_commitment: signature.signer_commitment,
+                signature_hex: signature.signature_hex,
+                scheme: signature.scheme,
+                public_key_hex: signature.public_key_hex,
+            })
+            .collect();
+        signature_inputs.sort_by(|a, b| a.signer_commitment.cmp(&b.signer_commitment));
+        signature_inputs.dedup_by(|a, b| a.signer_commitment == b.signer_commitment);
+
+        let required_commitments: HashSet<String> =
+            account.cosigner_commitments_hex().into_iter().collect();
+        let mut signature_advice = collect_signature_advice(
+            signature_inputs,
+            &required_commitments,
+            tx_summary_commitment,
+        )?;
+
+        if proposal.transaction_type.requires_guardian_ack() {
+            let guardian_advice = self
+                .get_guardian_ack_signature(
+                    &account,
+                    proposal.nonce,
+                    &derived_summary,
+                    tx_summary_commitment,
+                )
+                .await?;
+            signature_advice.push(guardian_advice);
+        }
+
+        Ok(signature_advice)
+    }
+
+    /// Submits an integration-built transaction on-chain (issue #266 producer
+    /// API). The caller injects the advice from `prepare_custom_execution` into
+    /// its own transaction request (`request.advice_map_mut().extend(advice)`)
+    /// and passes it here to finalize.
+    pub async fn submit_transaction(&mut self, request: TransactionRequest) -> Result<()> {
+        // Refresh local state first: the account may have advanced between
+        // `prepare_custom_execution` and submit, and submitting against stale
+        // state would reject an otherwise-valid request.
+        self.sync().await?;
+        let account_id = self.require_account()?.id();
+        self.miden_client
+            .submit_new_transaction(account_id, request)
+            .await
+            .map_err(|e| {
+                MultisigError::TransactionExecution(format!(
+                    "transaction submission failed: {:?}",
+                    e
+                ))
+            })?;
+        let _ = self.miden_client.sync_state().await;
+        Ok(())
     }
 
     /// Creates a proposal for a transaction.
@@ -306,6 +607,94 @@ impl MultisigClient {
             Err(e) => Err(e),
         }
     }
+
+    /// Requests abandonment of a pending canonicalization candidate whose
+    /// transaction will never land on-chain (issue #319).
+    ///
+    /// Call this after an approved transaction died client-side (RPC
+    /// submit failure, prover timeout, crash). The request records an
+    /// abandon *intent* on GUARDIAN; the account stays locked until the
+    /// guardian's canonicalization worker confirms over a short
+    /// quarantine (typically well under a minute) that the transaction
+    /// did not land, then releases the account. Poll [`Self::abandon_status`]
+    /// for the resolution.
+    ///
+    /// `nonce` pins the exact candidate to release; it is the nonce the
+    /// proposal was pushed with (committed account nonce + 1). Retries
+    /// are idempotent and preserve the original request timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the candidate's transaction actually landed
+    /// on-chain (`GUARDIAN_CANDIDATE_LANDED` — the server will
+    /// canonicalize it shortly), if no candidate exists at this nonce,
+    /// or if GUARDIAN cannot be reached.
+    pub async fn abandon_candidate(&mut self, nonce: u64) -> Result<AbandonRequestState> {
+        let account_id = self.require_account()?.id();
+
+        let mut guardian_client = self.create_authenticated_guardian_client().await?;
+        let response = guardian_client
+            .abandon_candidate(&account_id, nonce)
+            .await
+            .map_err(|e| {
+                MultisigError::GuardianServer(format!("failed to abandon candidate: {}", e))
+            })?;
+
+        Ok(match response.state.as_str() {
+            "abandoned" => AbandonRequestState::Abandoned,
+            "retained" => AbandonRequestState::Retained,
+            _ => AbandonRequestState::Pending,
+        })
+    }
+
+    /// Polls GUARDIAN for the resolution of an abandon request made with
+    /// [`Self::abandon_candidate`].
+    pub async fn abandon_status(&mut self, nonce: u64) -> Result<AbandonStatus> {
+        let account_id = self.require_account()?.id();
+
+        let mut guardian_client = self.create_authenticated_guardian_client().await?;
+        let response = match guardian_client.get_delta(&account_id, nonce).await {
+            Ok(response) => response,
+            // A missing delta is unexpected for an abandon in flight: the
+            // worker preserves an abandoned delta as discarded history.
+            Err(e) if e.to_string().to_lowercase().contains("not found") => {
+                return Ok(AbandonStatus::Unexpected);
+            }
+            Err(e) => {
+                return Err(MultisigError::GuardianServer(format!(
+                    "failed to poll abandon status: {}",
+                    e
+                )));
+            }
+        };
+
+        let Some(delta) = response.delta else {
+            return Ok(AbandonStatus::Unexpected);
+        };
+        let Some(status) = delta.status else {
+            return Ok(AbandonStatus::Unexpected);
+        };
+
+        Ok(classify_abandon_status(&status))
+    }
+}
+
+/// Maps a delta's wire status onto the abandon lifecycle.
+fn classify_abandon_status(status: &guardian_client::DeltaStatus) -> AbandonStatus {
+    use guardian_client::delta_status::Status as ProtoStatus;
+    match status.status {
+        Some(ProtoStatus::CandidateAt(_)) => AbandonStatus::Waiting,
+        Some(ProtoStatus::CanonicalAt(_)) => AbandonStatus::Landed,
+        Some(ProtoStatus::DiscardedAt(_)) if status.discard_reason == "client_abandoned" => {
+            AbandonStatus::Abandoned
+        }
+        // A retained delta no longer holds the account's candidate slot,
+        // but its on-chain outcome is still uncertain: distinct from
+        // `Abandoned`, which would wrongly imply the transaction
+        // definitively did not land.
+        Some(ProtoStatus::RetainedAt(_)) => AbandonStatus::Retained,
+        _ => AbandonStatus::Unexpected,
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +706,7 @@ mod tests {
     use miden_protocol::transaction::{InputNotes, RawOutputNotes, TransactionSummary};
     use miden_protocol::{Felt, Word, ZERO};
 
+    use super::{AbandonStatus, classify_abandon_status};
     use crate::error::{MultisigError, Result};
     use crate::proposal::Proposal;
 
@@ -334,7 +724,7 @@ mod tests {
             account_delta,
             InputNotes::new(Vec::new()).expect("empty input notes"),
             RawOutputNotes::new(Vec::new()).expect("empty output notes"),
-            Word::from([Felt::new(seed), ZERO, ZERO, ZERO]),
+            Word::from([Felt::new_unchecked(seed), ZERO, ZERO, ZERO]),
         )
     }
 
@@ -374,8 +764,8 @@ mod tests {
     #[test]
     fn inline_iteration_selects_by_unique_id_when_nonce_collides() {
         let same_nonce = 42;
-        let delta_a = proposal_delta("0x7bfb0f38b0fafa103f86a805594170", same_nonce, "0xaaa", 1);
-        let delta_b = proposal_delta("0x7bfb0f38b0fafa103f86a805594171", same_nonce, "0xbbb", 2);
+        let delta_a = proposal_delta("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", same_nonce, "0xaaa", 1);
+        let delta_b = proposal_delta("0x7c7c7c7c7c7c7c017c7c7c7c7c7c7c", same_nonce, "0xbbb", 2);
 
         let target = Proposal::from(&delta_b).expect("proposal parses");
 
@@ -396,7 +786,7 @@ mod tests {
 
     #[test]
     fn inline_iteration_rejects_duplicate_ids() {
-        let delta = proposal_delta("0x7bfb0f38b0fafa103f86a805594170", 42, "0xaaa", 1);
+        let delta = proposal_delta("0x7b7b7b7a7b7b7b017b7b7b7b7b7b7b", 42, "0xaaa", 1);
         let proposal_id = Proposal::from(&delta).expect("proposal parses").id;
 
         let mut matched: Option<(&DeltaObject, Proposal)> = None;
@@ -423,5 +813,48 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn abandon_status_classifies_every_wire_status() {
+        use guardian_client::DeltaStatus;
+        use guardian_client::delta_status::Status as ProtoStatus;
+
+        let status = |status: Option<ProtoStatus>, discard_reason: &str| DeltaStatus {
+            status,
+            discard_reason: discard_reason.to_string(),
+            retain_reason: String::new(),
+        };
+
+        let ts = "2026-07-28T00:00:00Z".to_string();
+        assert_eq!(
+            classify_abandon_status(&status(Some(ProtoStatus::CandidateAt(ts.clone())), "")),
+            AbandonStatus::Waiting
+        );
+        assert_eq!(
+            classify_abandon_status(&status(Some(ProtoStatus::CanonicalAt(ts.clone())), "")),
+            AbandonStatus::Landed
+        );
+        assert_eq!(
+            classify_abandon_status(&status(
+                Some(ProtoStatus::DiscardedAt(ts.clone())),
+                "client_abandoned"
+            )),
+            AbandonStatus::Abandoned
+        );
+        // A retained delta has released the account but its outcome is
+        // still uncertain: "unlocked but unresolved", never `Abandoned`.
+        assert_eq!(
+            classify_abandon_status(&status(Some(ProtoStatus::RetainedAt(ts.clone())), "")),
+            AbandonStatus::Retained
+        );
+        assert_eq!(
+            classify_abandon_status(&status(Some(ProtoStatus::DiscardedAt(ts)), "")),
+            AbandonStatus::Unexpected
+        );
+        assert_eq!(
+            classify_abandon_status(&status(None, "")),
+            AbandonStatus::Unexpected
+        );
     }
 }

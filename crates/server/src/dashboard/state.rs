@@ -1,0 +1,936 @@
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use guardian_shared::hex::{FromHex, IntoHex};
+use miden_protocol::crypto::dsa::falcon512_poseidon2::Signature;
+use tokio::sync::RwLock;
+
+use super::allowlist::{
+    AllowlistSource, OperatorAllowlist, OperatorAllowlistEntryInput, normalize_commitment,
+};
+use super::config::DashboardConfig;
+use super::cursor::CursorSecret;
+use super::types::{
+    AuthenticatedOperator, IssuedOperatorSession, OperatorChallenge, OperatorChallengePayload,
+};
+use super::util::{cookie_date, correlation_id, random_hex, rate_limit_error};
+use crate::coordination::{
+    ChallengePayload, ChallengeStore, InMemoryChallengeStore, InMemorySessionStore, SessionStore,
+    SessionSubject, StoredChallenge, StoredSession,
+};
+use crate::error::{GuardianError, Result};
+use crate::middleware::rate_limit::RateLimitStore;
+use crate::network::NetworkType;
+use crate::secret::session_digest;
+
+#[derive(Clone)]
+pub struct DashboardState {
+    config: DashboardConfig,
+    allowlist_source: AllowlistSource,
+    allowlist: Arc<RwLock<OperatorAllowlist>>,
+    session_store: Arc<dyn SessionStore>,
+    challenge_store: Arc<dyn ChallengeStore>,
+    commitment_rate_limits: RateLimitStore,
+    cursor_secret: CursorSecret,
+    cursor_secret_configured: bool,
+    started_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for DashboardState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DashboardState")
+            .field("config", &self.config)
+            .field("cursor_secret_configured", &self.cursor_secret_configured)
+            .field("started_at", &self.started_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DashboardState {
+    pub async fn from_env_for_network(
+        network_type: NetworkType,
+    ) -> std::result::Result<Self, String> {
+        Self::from_env_for_network_with_stores(
+            network_type,
+            Arc::new(InMemorySessionStore::new()),
+            Arc::new(InMemoryChallengeStore::new()),
+        )
+        .await
+    }
+
+    /// Same as [`DashboardState::from_env_for_network`] but with explicit,
+    /// realm-bound coordination stores. The server builder passes shared
+    /// (Postgres) stores here on the Postgres backend; the default path uses
+    /// in-memory stores (single-process / dev).
+    pub async fn from_env_for_network_with_stores(
+        network_type: NetworkType,
+        session_store: Arc<dyn SessionStore>,
+        challenge_store: Arc<dyn ChallengeStore>,
+    ) -> std::result::Result<Self, String> {
+        let config = DashboardConfig::from_env_for_network(network_type)?;
+        let allowlist_source = AllowlistSource::from_env().await?;
+        let allowlist = allowlist_source.load().await?;
+        Self::from_allowlist_source(
+            allowlist_source,
+            allowlist,
+            config,
+            session_store,
+            challenge_store,
+        )
+    }
+
+    pub fn for_tests(entries: Vec<(String, String)>) -> Self {
+        let inputs = entries
+            .into_iter()
+            .map(|(operator_id, commitment)| OperatorAllowlistEntryInput {
+                operator_id,
+                commitment,
+            })
+            .collect();
+        let allowlist = OperatorAllowlist::from_entries(inputs)
+            .expect("dashboard test configuration should be valid");
+        Self::from_allowlist_source(
+            AllowlistSource::Static,
+            allowlist,
+            DashboardConfig::for_tests(),
+            Arc::new(InMemorySessionStore::new()),
+            Arc::new(InMemoryChallengeStore::new()),
+        )
+        .expect("dashboard test configuration should be valid")
+    }
+
+    /// Test-only constructor that lets feature 006-operator-authz
+    /// integration tests inject operators with arbitrary permission
+    /// sets (including the explicit-empty `permissions: []` case from
+    /// FR-003). Behavior is otherwise identical to `for_tests`.
+    #[cfg(test)]
+    pub fn for_tests_with_permissions(
+        operators: Vec<crate::dashboard::types::AuthenticatedOperator>,
+    ) -> Self {
+        let allowlist = OperatorAllowlist::from_authenticated_operators(operators)
+            .expect("dashboard test configuration should be valid");
+        Self::from_allowlist_source(
+            AllowlistSource::Static,
+            allowlist,
+            DashboardConfig::for_tests(),
+            Arc::new(InMemorySessionStore::new()),
+            Arc::new(InMemoryChallengeStore::new()),
+        )
+        .expect("dashboard test configuration should be valid")
+    }
+
+    /// Simulate an allowlist hot-reload while keeping sessions intact.
+    /// Used by SC-013 / SC-004 tests for the FR-008 re-resolve path.
+    #[cfg(test)]
+    pub async fn replace_allowlist_for_tests(
+        &self,
+        operators: Vec<crate::dashboard::types::AuthenticatedOperator>,
+    ) {
+        let allowlist = OperatorAllowlist::from_authenticated_operators(operators)
+            .expect("dashboard test allowlist swap should be valid");
+        let mut guard = self.allowlist.write().await;
+        *guard = allowlist;
+    }
+
+    pub fn cookie_name(&self) -> &str {
+        &self.config.cookie_name
+    }
+
+    pub fn clear_cookie_header(&self) -> String {
+        let expires = "Thu, 01 Jan 1970 00:00:00 GMT";
+        format!(
+            "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Expires={}",
+            self.config.cookie_name, expires
+        )
+    }
+
+    pub async fn issue_challenge(
+        &self,
+        commitment: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OperatorChallenge> {
+        self.refresh_allowlist().await?;
+        self.rate_limit_commitment("challenge", commitment)?;
+
+        let correlation_id = correlation_id();
+        let normalized_commitment =
+            normalize_commitment(commitment).unwrap_or_else(|_| commitment.to_string());
+        let payload = OperatorChallengePayload {
+            domain: self.config.canonical_domain.clone(),
+            commitment: normalized_commitment.clone(),
+            nonce: random_hex::<32>(),
+            expires_at: (now + self.config.nonce_ttl).to_rfc3339(),
+        };
+        let signing_digest = payload.signing_digest().map_err(|error| {
+            GuardianError::ConfigurationError(format!("Failed to create challenge digest: {error}"))
+        })?;
+
+        if self
+            .lookup_allowlisted_operator(&normalized_commitment)
+            .await
+            .is_some()
+        {
+            let expires_at = now + self.config.nonce_ttl;
+            let challenge = StoredChallenge {
+                key: signing_digest.into_hex(),
+                payload: ChallengePayload::OperatorDigest(signing_digest),
+                issued_at: now,
+                expires_at,
+            };
+            self.challenge_store
+                .issue(
+                    &normalized_commitment,
+                    challenge,
+                    self.config.max_outstanding_challenges,
+                    now,
+                )
+                .await?;
+
+            tracing::info!(
+                auth_event = "challenge_issued",
+                correlation_id = %correlation_id,
+                commitment = %normalized_commitment,
+                "Operator challenge issued"
+            );
+        } else {
+            tracing::info!(
+                auth_event = "challenge_issued_decoy",
+                correlation_id = %correlation_id,
+                commitment = %normalized_commitment,
+                "Operator challenge issued without allowlist match"
+            );
+        }
+
+        Ok(OperatorChallenge {
+            payload,
+            signing_digest: signing_digest.into_hex(),
+        })
+    }
+
+    pub async fn verify(
+        &self,
+        commitment: &str,
+        signature_hex: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedOperatorSession> {
+        self.refresh_allowlist().await?;
+        self.rate_limit_commitment("verify", commitment)?;
+
+        let correlation_id = correlation_id();
+        let normalized_commitment = normalize_commitment(commitment).map_err(|_| {
+            tracing::warn!(
+                auth_event = "verify_failed",
+                correlation_id = %correlation_id,
+                "Operator verify rejected because the commitment was invalid"
+            );
+            GuardianError::AuthenticationFailed("Invalid operator credentials".to_string())
+        })?;
+        let operator = self
+            .lookup_allowlisted_operator(&normalized_commitment)
+            .await
+            .ok_or_else(|| {
+                tracing::warn!(
+                    auth_event = "verify_failed",
+                    correlation_id = %correlation_id,
+                    commitment = %normalized_commitment,
+                    "Operator verify rejected because the commitment is not allowlisted"
+                );
+                GuardianError::AuthenticationFailed("Invalid operator credentials".to_string())
+            })?;
+
+        let signature = Signature::from_hex(signature_hex).map_err(|_| {
+            tracing::warn!(
+                auth_event = "verify_failed",
+                correlation_id = %correlation_id,
+                operator_id = %operator.operator_id,
+                "Operator verify rejected because the signature was malformed"
+            );
+            GuardianError::AuthenticationFailed("Invalid operator credentials".to_string())
+        })?;
+        let public_key = signature.public_key();
+        let signature_commitment = public_key.to_commitment().into_hex();
+        if signature_commitment != normalized_commitment {
+            tracing::warn!(
+                auth_event = "verify_failed",
+                correlation_id = %correlation_id,
+                operator_id = %operator.operator_id,
+                "Operator verify rejected because the signature commitment did not match the requested commitment"
+            );
+            return Err(GuardianError::AuthenticationFailed(
+                "Invalid operator credentials".to_string(),
+            ));
+        }
+
+        let active = self
+            .challenge_store
+            .active_for(&normalized_commitment, now)
+            .await?;
+        let matched = active.iter().find(|challenge| match &challenge.payload {
+            ChallengePayload::OperatorDigest(digest) => public_key.verify(*digest, &signature),
+            _ => false,
+        });
+
+        let Some(matched) = matched else {
+            tracing::warn!(
+                auth_event = "verify_failed",
+                correlation_id = %correlation_id,
+                operator_id = %operator.operator_id,
+                "Operator verify rejected because no active challenge matched the signature"
+            );
+            return Err(GuardianError::AuthenticationFailed(
+                "Invalid operator credentials".to_string(),
+            ));
+        };
+
+        if !self
+            .challenge_store
+            .consume(&normalized_commitment, &matched.key, now)
+            .await?
+        {
+            tracing::warn!(
+                auth_event = "verify_failed",
+                correlation_id = %correlation_id,
+                operator_id = %operator.operator_id,
+                "Operator verify rejected because the matched challenge was already consumed"
+            );
+            return Err(GuardianError::AuthenticationFailed(
+                "Invalid operator credentials".to_string(),
+            ));
+        }
+
+        let issued_at = now;
+        let expires_at = now + self.config.session_ttl;
+        let operator_identity = operator.clone();
+        let token = random_hex::<32>();
+        let cookie_header = self.session_cookie_header(&token, issued_at, expires_at);
+        let session_key = session_digest(&token);
+
+        self.session_store
+            .insert(
+                session_key,
+                StoredSession {
+                    subject: SessionSubject::Operator {
+                        operator_id: operator_identity.operator_id.clone(),
+                        commitment: normalized_commitment.clone(),
+                    },
+                    issued_at,
+                    expires_at,
+                },
+            )
+            .await?;
+
+        tracing::info!(
+            auth_event = "verify_success",
+            correlation_id = %correlation_id,
+            operator_id = %operator.operator_id,
+            "Operator session created"
+        );
+
+        Ok(IssuedOperatorSession {
+            operator: operator_identity,
+            expires_at: expires_at.to_rfc3339(),
+            cookie_header,
+        })
+    }
+
+    pub async fn authenticate_session(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AuthenticatedOperator> {
+        self.refresh_allowlist().await?;
+
+        let session_key = session_digest(token);
+        let session = self
+            .session_store
+            .get(&session_key, now)
+            .await?
+            .ok_or_else(|| {
+                tracing::warn!(
+                    auth_event = "session_rejected",
+                    reason = "missing_or_expired",
+                    "Operator session rejected"
+                );
+                GuardianError::AuthenticationFailed("Invalid operator session".to_string())
+            })?;
+
+        let SessionSubject::Operator {
+            operator_id,
+            commitment,
+        } = &session.subject
+        else {
+            return Err(GuardianError::AuthenticationFailed(
+                "Invalid operator session".to_string(),
+            ));
+        };
+
+        // Re-resolve the principal from the **live** allowlist snapshot rather
+        // than the identity carried in the session record, so a permission grant
+        // or revocation takes effect on the next request without re-login.
+        let Some(live_operator) = self.lookup_allowlisted_operator(commitment).await else {
+            self.session_store.revoke(&session_key).await?;
+            tracing::warn!(
+                auth_event = "session_rejected",
+                operator_id = %operator_id,
+                reason = "revoked",
+                "Operator session rejected because the operator is no longer allowlisted"
+            );
+            return Err(GuardianError::AuthenticationFailed(
+                "Invalid operator session".to_string(),
+            ));
+        };
+
+        Ok(live_operator)
+    }
+
+    pub async fn logout(&self, token: Option<&str>, _now: DateTime<Utc>) -> Result<()> {
+        if let Some(token) = token
+            && let Some(session) = self.session_store.revoke(&session_digest(token)).await?
+            && let SessionSubject::Operator { operator_id, .. } = &session.subject
+        {
+            tracing::info!(
+                auth_event = "logout",
+                operator_id = %operator_id,
+                issued_at = %session.issued_at.to_rfc3339(),
+                "Operator session cleared"
+            );
+        }
+        Ok(())
+    }
+
+    fn from_allowlist_source(
+        allowlist_source: AllowlistSource,
+        allowlist: OperatorAllowlist,
+        mut config: DashboardConfig,
+        session_store: Arc<dyn SessionStore>,
+        challenge_store: Arc<dyn ChallengeStore>,
+    ) -> std::result::Result<Self, String> {
+        tracing::info!(
+            auth_event = "allowlist_loaded",
+            operator_count = allowlist.len(),
+            "Operator allowlist loaded"
+        );
+        let configured_cursor_secret = config.take_cursor_secret();
+        let cursor_secret_configured = configured_cursor_secret.is_some();
+        let cursor_secret = match configured_cursor_secret {
+            Some(secret) => secret,
+            None => {
+                if !cfg!(test) {
+                    tracing::warn!(
+                        "dashboard cursor secret not configured; generating ephemeral per-process \
+                         secret. This degrades only dashboard pagination: a multi-replica \
+                         deployment must set GUARDIAN_DASHBOARD_CURSOR_SECRET to a stable shared \
+                         64-hex (32-byte) value, or a cursor minted on one replica fails on another."
+                    );
+                }
+                CursorSecret::generate()
+            }
+        };
+        Ok(Self {
+            commitment_rate_limits: RateLimitStore::new(config.commitment_rate_limit.clone()),
+            config,
+            allowlist_source,
+            allowlist: Arc::new(RwLock::new(allowlist)),
+            session_store,
+            challenge_store,
+            cursor_secret,
+            cursor_secret_configured,
+            started_at: Utc::now(),
+        })
+    }
+
+    /// Reclaim expired operator sessions and challenges. Run periodically by the
+    /// server's background sweep; expiry is also enforced on read, so this is
+    /// housekeeping (and a no-op for the in-memory backend beyond freeing memory).
+    pub async fn sweep_expired(&self, now: DateTime<Utc>) -> Result<()> {
+        self.session_store.sweep_expired(now).await?;
+        self.challenge_store.sweep_expired(now).await?;
+        Ok(())
+    }
+
+    /// Server-side signing secret for opaque pagination cursors. See
+    /// `crate::dashboard::cursor`. Generated once per server startup.
+    pub fn cursor_secret(&self) -> &CursorSecret {
+        &self.cursor_secret
+    }
+
+    /// Number of operators in the active allowlist. Surfaced in the
+    /// startup configuration summary.
+    pub async fn operator_count(&self) -> usize {
+        self.allowlist.read().await.len()
+    }
+
+    /// Whether the pagination cursor secret was supplied via
+    /// configuration (`true`) or generated ephemerally for this process
+    /// (`false`). Surfaced in the startup configuration summary; the
+    /// ephemeral case also emits a multi-replica warning at startup.
+    pub fn cursor_secret_configured(&self) -> bool {
+        self.cursor_secret_configured
+    }
+
+    /// Filesystem-backed cross-account aggregate threshold from
+    /// [`DashboardConfig`]. Used by feature `005-operator-dashboard-metrics`
+    /// per FR-029.
+    pub fn filesystem_aggregate_threshold(&self) -> usize {
+        self.config.filesystem_aggregate_threshold()
+    }
+
+    /// Deployment environment identifier surfaced on
+    /// `GET /dashboard/info` (e.g. `mainnet`, `testnet`).
+    pub fn environment(&self) -> &str {
+        self.config.environment()
+    }
+
+    /// The Miden network this server is configured against
+    /// (`GUARDIAN_NETWORK_TYPE`). Network-dependent rendering such as
+    /// bech32 address HRPs must derive from this, not from per-account
+    /// metadata.
+    pub fn network_type(&self) -> NetworkType {
+        self.config.network_type()
+    }
+
+    /// Wall-clock time the dashboard state (and effectively the process)
+    /// was initialized. Surfaced on `GET /dashboard/info` to identify
+    /// the running binary instance.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
+    }
+
+    async fn refresh_allowlist(&self) -> Result<()> {
+        let Some(updated_allowlist) =
+            self.allowlist_source
+                .load_dynamic()
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        auth_event = "allowlist_reload_failed",
+                        source = %self.allowlist_source.label(),
+                        %error,
+                        "Failed to reload operator allowlist"
+                    );
+                    GuardianError::ConfigurationError(
+                        "operator allowlist is misconfigured".to_string(),
+                    )
+                })?
+        else {
+            return Ok(());
+        };
+
+        let mut allowlist = self.allowlist.write().await;
+        if *allowlist != updated_allowlist {
+            tracing::info!(
+                auth_event = "allowlist_reloaded",
+                operator_count = updated_allowlist.len(),
+                source = %self.allowlist_source.label(),
+                "Operator allowlist reloaded"
+            );
+            *allowlist = updated_allowlist;
+        }
+        Ok(())
+    }
+
+    async fn lookup_allowlisted_operator(&self, commitment: &str) -> Option<AuthenticatedOperator> {
+        let allowlist = self.allowlist.read().await;
+        allowlist.lookup(commitment).cloned()
+    }
+
+    fn rate_limit_commitment(&self, endpoint: &str, commitment: &str) -> Result<()> {
+        if !self.config.commitment_rate_limit.enabled {
+            return Ok(());
+        }
+
+        let key = format!("endpoint:{endpoint}|commitment:{commitment}");
+        if let Err(limit_type) = self.commitment_rate_limits.check_burst(&key) {
+            return Err(rate_limit_error(limit_type));
+        }
+        if let Err(limit_type) = self.commitment_rate_limits.check_sustained(&key) {
+            return Err(rate_limit_error(limit_type));
+        }
+        Ok(())
+    }
+
+    fn session_cookie_header(
+        &self,
+        token: &str,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> String {
+        let max_age = (expires_at - issued_at).num_seconds().max(0);
+        format!(
+            "{}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}; Expires={}",
+            self.config.cookie_name,
+            token,
+            max_age,
+            cookie_date(expires_at)
+        )
+    }
+}
+
+impl Default for DashboardState {
+    fn default() -> Self {
+        Self::for_tests(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::LazyLock;
+
+    use chrono::{Duration, Utc};
+    use guardian_shared::hex::FromHex;
+    use miden_protocol::Word;
+    use tokio::sync::Mutex as TokioMutex;
+    use uuid::Uuid;
+
+    use crate::network::NetworkType;
+
+    use super::super::allowlist::{
+        ENV_OPERATOR_PUBLIC_KEYS_FILE, ENV_OPERATOR_PUBLIC_KEYS_SECRET_ID,
+    };
+    use super::super::config::{
+        DEFAULT_CANONICAL_DOMAIN, DEFAULT_COOKIE_NAME, DEFAULT_MAX_OUTSTANDING_CHALLENGES,
+        DEFAULT_NONCE_TTL_SECS, DEFAULT_PUBKEY_RATE_BURST_PER_SEC, DEFAULT_PUBKEY_RATE_PER_MIN,
+        DEFAULT_SESSION_TTL_SECS, OPEN_DASHBOARD_DOMAIN,
+    };
+    use super::{DashboardConfig, DashboardState};
+    use crate::testing::helpers::TestSigner;
+
+    static ENV_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+
+    /// Pull the bare token out of a `Set-Cookie` header of the form
+    /// `name=token; HttpOnly; ...`. Used by tests that need to replay a
+    /// session token after the digest-keyed storage shape stopped exposing
+    /// raw tokens in the session map.
+    fn parse_token_from_cookie(cookie_header: &str) -> String {
+        let value = cookie_header
+            .split(';')
+            .next()
+            .expect("non-empty cookie header");
+        value
+            .split_once('=')
+            .map(|(_, token)| token.to_string())
+            .expect("cookie has name=value")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<str>) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value.as_ref()) };
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    fn operator_public_keys_json(public_keys: &[&str]) -> String {
+        serde_json::to_string(public_keys).expect("operator public keys should serialize")
+    }
+
+    fn write_operator_public_keys_file(path: &std::path::Path, public_keys: &[&str]) {
+        fs::write(path, operator_public_keys_json(public_keys))
+            .expect("operator public keys file should be written");
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_config_uses_opinionated_defaults() {
+        let config = DashboardConfig::default();
+
+        assert_eq!(config.canonical_domain, DEFAULT_CANONICAL_DOMAIN);
+        assert_eq!(config.canonical_domain, OPEN_DASHBOARD_DOMAIN);
+        assert_eq!(config.cookie_name, DEFAULT_COOKIE_NAME);
+        assert_eq!(config.nonce_ttl, Duration::seconds(DEFAULT_NONCE_TTL_SECS));
+        assert_eq!(
+            config.session_ttl,
+            Duration::seconds(DEFAULT_SESSION_TTL_SECS)
+        );
+        assert_eq!(
+            config.max_outstanding_challenges,
+            DEFAULT_MAX_OUTSTANDING_CHALLENGES
+        );
+        assert!(config.commitment_rate_limit.enabled);
+        assert_eq!(
+            config.commitment_rate_limit.burst_per_sec,
+            DEFAULT_PUBKEY_RATE_BURST_PER_SEC
+        );
+        assert_eq!(
+            config.commitment_rate_limit.per_min,
+            DEFAULT_PUBKEY_RATE_PER_MIN
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_state_loads_operator_public_keys_from_file() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let operator_one = TestSigner::new();
+        let operator_two = TestSigner::new();
+        let path = std::env::temp_dir().join(format!(
+            "guardian_operator_public_keys_{}.json",
+            Uuid::new_v4()
+        ));
+
+        write_operator_public_keys_file(
+            &path,
+            &[&operator_one.pubkey_hex, &operator_two.pubkey_hex],
+        );
+        let _operator_public_keys_file =
+            EnvVarGuard::set(ENV_OPERATOR_PUBLIC_KEYS_FILE, path.display().to_string());
+        let _operator_public_keys_secret = EnvVarGuard::remove(ENV_OPERATOR_PUBLIC_KEYS_SECRET_ID);
+
+        let state = DashboardState::from_env_for_network(NetworkType::MidenDevnet)
+            .await
+            .expect("dashboard state should load");
+        let now = Utc::now();
+        let challenge_one = state
+            .issue_challenge(&operator_one.commitment_hex, now)
+            .await
+            .expect("first challenge should succeed");
+        let signature_one = operator_one
+            .sign_word(Word::from_hex(&challenge_one.signing_digest).expect("digest should parse"));
+        state
+            .verify(&operator_one.commitment_hex, &signature_one, now)
+            .await
+            .expect("first verify should succeed");
+
+        let challenge_two = state
+            .issue_challenge(&operator_two.commitment_hex, now)
+            .await
+            .expect("second challenge should succeed");
+        let signature_two = operator_two
+            .sign_word(Word::from_hex(&challenge_two.signing_digest).expect("digest should parse"));
+        let session_two = state
+            .verify(&operator_two.commitment_hex, &signature_two, now)
+            .await
+            .expect("second verify should succeed");
+        assert_eq!(
+            session_two.operator.operator_id,
+            operator_two.commitment_hex
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn dashboard_state_rereads_operator_public_keys_file_in_process() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let operator_one = TestSigner::new();
+        let operator_two = TestSigner::new();
+        let path = std::env::temp_dir().join(format!(
+            "guardian_operator_public_keys_{}.json",
+            Uuid::new_v4()
+        ));
+
+        write_operator_public_keys_file(&path, &[&operator_one.pubkey_hex]);
+        let _operator_public_keys_file =
+            EnvVarGuard::set(ENV_OPERATOR_PUBLIC_KEYS_FILE, path.display().to_string());
+        let _operator_public_keys_secret = EnvVarGuard::remove(ENV_OPERATOR_PUBLIC_KEYS_SECRET_ID);
+
+        let state = DashboardState::from_env_for_network(NetworkType::MidenDevnet)
+            .await
+            .expect("dashboard state should load");
+        let now = Utc::now();
+        let challenge_one = state
+            .issue_challenge(&operator_one.commitment_hex, now)
+            .await
+            .expect("first challenge should succeed");
+        let signature_one = operator_one
+            .sign_word(Word::from_hex(&challenge_one.signing_digest).expect("digest should parse"));
+        let session_one = state
+            .verify(&operator_one.commitment_hex, &signature_one, now)
+            .await
+            .expect("first verify should succeed");
+        let original_token = parse_token_from_cookie(&session_one.cookie_header);
+
+        write_operator_public_keys_file(&path, &[&operator_two.pubkey_hex]);
+
+        let later = now + Duration::seconds(1);
+        let challenge_two = state
+            .issue_challenge(&operator_two.commitment_hex, later)
+            .await
+            .expect("updated env challenge should succeed");
+        let signature_two = operator_two
+            .sign_word(Word::from_hex(&challenge_two.signing_digest).expect("digest should parse"));
+        let session_two = state
+            .verify(&operator_two.commitment_hex, &signature_two, later)
+            .await
+            .expect("updated env verify should succeed");
+        assert_eq!(
+            session_two.operator.operator_id,
+            operator_two.commitment_hex
+        );
+
+        assert!(
+            state
+                .authenticate_session(&original_token, later)
+                .await
+                .is_err(),
+            "old session should be revoked after allowlist reload"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn allowlist_reload_error_does_not_leak_path_or_entry_details() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let operator = TestSigner::new();
+        let path = std::env::temp_dir().join(format!(
+            "guardian_operator_public_keys_{}.json",
+            Uuid::new_v4()
+        ));
+
+        write_operator_public_keys_file(&path, &[&operator.pubkey_hex]);
+        let _operator_public_keys_file =
+            EnvVarGuard::set(ENV_OPERATOR_PUBLIC_KEYS_FILE, path.display().to_string());
+        let _operator_public_keys_secret = EnvVarGuard::remove(ENV_OPERATOR_PUBLIC_KEYS_SECRET_ID);
+
+        let state = DashboardState::from_env_for_network(NetworkType::MidenDevnet)
+            .await
+            .expect("dashboard state should load");
+
+        let bad_entry = format!(
+            r#"[{{"public_key":"{}","permissions":["account:pause"]}}]"#,
+            operator.pubkey_hex
+        );
+        fs::write(&path, &bad_entry).expect("bad allowlist file should be written");
+
+        let now = Utc::now() + Duration::seconds(1);
+        let error = state
+            .issue_challenge(&operator.commitment_hex, now)
+            .await
+            .expect_err("issue_challenge should fail after allowlist becomes invalid");
+        let rendered = error.to_string();
+
+        assert!(
+            !rendered.contains(path.display().to_string().as_str()),
+            "error must not disclose allowlist file path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("account:pause"),
+            "error must not echo bad permission value: {rendered}"
+        );
+        assert!(
+            !rendered.contains("entry"),
+            "error must not disclose entry index: {rendered}"
+        );
+        assert!(
+            !rendered.contains(ENV_OPERATOR_PUBLIC_KEYS_FILE),
+            "error must not disclose env var name: {rendered}"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn session_lookup_round_trips_via_digest() {
+        let operator = TestSigner::new();
+        let state = DashboardState::for_tests(vec![(
+            "operator-1".to_string(),
+            operator.commitment_hex.clone(),
+        )]);
+        let now = Utc::now();
+        let challenge = state
+            .issue_challenge(&operator.commitment_hex, now)
+            .await
+            .expect("challenge");
+        let signature =
+            operator.sign_word(Word::from_hex(&challenge.signing_digest).expect("digest"));
+        let session = state
+            .verify(&operator.commitment_hex, &signature, now)
+            .await
+            .expect("verify");
+        let token = parse_token_from_cookie(&session.cookie_header);
+
+        state
+            .authenticate_session(&token, now)
+            .await
+            .expect("session lookup succeeds with original token");
+
+        let mismatched = format!("{token}deadbeef");
+        assert!(state.authenticate_session(&mismatched, now).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_is_keyed_by_digest_not_plaintext_token() {
+        let operator = TestSigner::new();
+        let state = DashboardState::for_tests(vec![(
+            "operator-1".to_string(),
+            operator.commitment_hex.clone(),
+        )]);
+        let now = Utc::now();
+        let challenge = state
+            .issue_challenge(&operator.commitment_hex, now)
+            .await
+            .expect("challenge");
+        let signature =
+            operator.sign_word(Word::from_hex(&challenge.signing_digest).expect("digest"));
+        let session = state
+            .verify(&operator.commitment_hex, &signature, now)
+            .await
+            .expect("verify");
+        let token = parse_token_from_cookie(&session.cookie_header);
+
+        // The store only ever receives `session_digest(token)`, never the
+        // plaintext token: the digest differs from the token bytes, and
+        // authentication round-trips on the real token (proving the mapping).
+        assert_ne!(
+            crate::secret::session_digest(&token).as_slice(),
+            token.as_bytes(),
+            "session key must be a digest, not the plaintext token"
+        );
+        state
+            .authenticate_session(&token, now)
+            .await
+            .expect("session lookup round-trips on the real token");
+    }
+
+    #[tokio::test]
+    async fn unset_cursor_secret_boots_in_every_stage() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let _no_secret = EnvVarGuard::remove("GUARDIAN_DASHBOARD_CURSOR_SECRET");
+
+        let prod = EnvVarGuard::set("GUARDIAN_ENV", "prod");
+        let prod_result = DashboardState::from_allowlist_source(
+            super::AllowlistSource::Static,
+            super::OperatorAllowlist::from_entries(Vec::new()).expect("empty allowlist is valid"),
+            DashboardConfig::for_tests(),
+            std::sync::Arc::new(crate::coordination::InMemorySessionStore::new()),
+            std::sync::Arc::new(crate::coordination::InMemoryChallengeStore::new()),
+        );
+        assert!(
+            prod_result.is_ok(),
+            "prod stage tolerates an unset cursor secret (warns, ephemeral fallback)"
+        );
+        drop(prod);
+
+        let non_prod_result = DashboardState::from_allowlist_source(
+            super::AllowlistSource::Static,
+            super::OperatorAllowlist::from_entries(Vec::new()).expect("empty allowlist is valid"),
+            DashboardConfig::for_tests(),
+            std::sync::Arc::new(crate::coordination::InMemorySessionStore::new()),
+            std::sync::Arc::new(crate::coordination::InMemoryChallengeStore::new()),
+        );
+        assert!(
+            non_prod_result.is_ok(),
+            "non-prod tolerates an unset cursor secret (ephemeral fallback)"
+        );
+    }
+}
